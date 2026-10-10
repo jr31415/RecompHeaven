@@ -1,0 +1,340 @@
+From 09c4d0307b1a01ee6b09c645b159b6fe33da58eb Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Sat, 10 Oct 2026 14:35:16 -0700
+Subject: [PATCH] iOS: runner builds for iPhoneOS/Simulator (SDL_RunApp entry,
+ app bundle, no CoreAudio probe), explicit emulation-thread stack,
+ NONE-backend latency stub
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runner/CMakeLists.txt            | 38 ++++++++++++++-
+ runner/ios/Info.plist.in         | 39 +++++++++++++++
+ runner/src/audio_device_info.cpp |  4 ++
+ runner/src/frontend.cpp          | 42 +++++++++++++++-
+ runner/src/ios_launch.mm         | 83 ++++++++++++++++++++++++++++++++
+ runner/src/main.cpp              |  9 ++++
+ 6 files changed, 212 insertions(+), 3 deletions(-)
+ create mode 100644 runner/ios/Info.plist.in
+ create mode 100644 runner/src/ios_launch.mm
+
+diff --git a/runner/CMakeLists.txt b/runner/CMakeLists.txt
+index ae0cd76..0005dd8 100644
+--- a/runner/CMakeLists.txt
++++ b/runner/CMakeLists.txt
+@@ -1,5 +1,8 @@
+ cmake_minimum_required(VERSION 3.20)
+ project(nds_runner VERSION 0.6.10 LANGUAGES C CXX)
++if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    enable_language(OBJCXX)
++endif()
+ 
+ include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsCompilerCache.cmake")
+ include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsJobPools.cmake")
+@@ -781,7 +784,8 @@ elseif(NDS_SDL_BACKEND STREQUAL "SDL2")
+         NDS_SDL_BACKEND_NAME="SDL2")
+     target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
+ elseif(NDS_SDL_BACKEND STREQUAL "NONE")
+-    target_compile_definitions(nds_runner PRIVATE NDS_SDL_BACKEND_NAME="NONE")
++    target_compile_definitions(nds_runner PRIVATE NDS_SDL_BACKEND_NAME="NONE"
++        NDS_SDL_BACKEND_IS_NONE=1)
+ else()
+     message(FATAL_ERROR "NDS_SDL_BACKEND must be SDL3, SDL2, or NONE")
+ endif()
+@@ -802,12 +806,42 @@ endif()
+ # macOS gives a process by default, faulting in ___chkstk_darwin before the
+ # firmware hands off. Linux's 8 MB soft limit is raisable per-shell; the macOS
+ # main thread size is fixed at link time, so ask for it here.
+-if(APPLE)
++if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     target_link_options(nds_runner PRIVATE -Wl,-stack_size,0x4000000)
+     # Output-device latency introspection for the audio-latency probe.
+     target_link_libraries(nds_runner PRIVATE "-framework CoreAudio"
+         "-framework CoreFoundation")
+ endif()
++if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    # App bundle: SDL_RunApp (src/ios_launch.mm) owns UIApplicationMain; the
++    # emulation thread carries its own stack. The user's ROM is read from the
++    # app's Documents folder at run time; nothing game-derived is in this
++    # target other than the title banks the user built locally.
++    set(NDS_IOS_BUNDLE_ID "com.example.ndsrecomp" CACHE STRING
++        "CFBundleIdentifier (use an id your signing identity may sign)")
++    set(NDS_IOS_APP_NAME "NDS Recomp" CACHE STRING "Home-screen name")
++    set(NDS_IOS_GAME_CONFIG "" CACHE FILEPATH
++        "Optional game.toml copied into the bundle as game.toml")
++    if(NOT NDS_SDL_BACKEND STREQUAL "NONE")
++    target_sources(nds_runner PRIVATE src/ios_launch.mm)
++    set_target_properties(nds_runner PROPERTIES
++        MACOSX_BUNDLE TRUE
++        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_LIST_DIR}/ios/Info.plist.in"
++        MACOSX_BUNDLE_GUI_IDENTIFIER "${NDS_IOS_BUNDLE_ID}"
++        MACOSX_BUNDLE_BUNDLE_NAME "${NDS_IOS_APP_NAME}"
++        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
++        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
++        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
++    if(NDS_IOS_GAME_CONFIG)
++        target_sources(nds_runner PRIVATE "${NDS_IOS_GAME_CONFIG}")
++        set_source_files_properties("${NDS_IOS_GAME_CONFIG}" PROPERTIES
++            MACOSX_PACKAGE_LOCATION Resources)
++    endif()
++    else()
++        # Headless (no UIKit): a plain executable, for `simctl spawn` testing.
++        set_target_properties(nds_runner PROPERTIES MACOSX_BUNDLE FALSE)
++    endif()
++endif()
+ 
+ find_package(Python3 COMPONENTS Interpreter QUIET)
+ 
+diff --git a/runner/ios/Info.plist.in b/runner/ios/Info.plist.in
+new file mode 100644
+index 0000000..ac436af
+--- /dev/null
++++ b/runner/ios/Info.plist.in
+@@ -0,0 +1,39 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++  <key>CFBundleDevelopmentRegion</key><string>en</string>
++  <key>CFBundleExecutable</key><string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
++  <key>CFBundleIdentifier</key><string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
++  <key>CFBundleName</key><string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
++  <key>CFBundleDisplayName</key><string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
++  <key>CFBundlePackageType</key><string>APPL</string>
++  <key>CFBundleShortVersionString</key><string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
++  <key>CFBundleVersion</key><string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
++  <key>LSRequiresIPhoneOS</key><true/>
++  <key>MinimumOSVersion</key><string>17.0</string>
++  <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
++  <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
++  <key>UIFileSharingEnabled</key><true/>
++  <key>LSSupportsOpeningDocumentsInPlace</key><true/>
++  <key>UIRequiresFullScreen</key><true/>
++  <key>UIStatusBarHidden</key><true/>
++  <key>UIViewControllerBasedStatusBarAppearance</key><false/>
++  <key>UIApplicationSupportsIndirectInputEvents</key><true/>
++  <key>UILaunchScreen</key><dict/>
++  <key>UISupportedInterfaceOrientations</key>
++  <array>
++    <string>UIInterfaceOrientationPortrait</string>
++    <string>UIInterfaceOrientationPortraitUpsideDown</string>
++    <string>UIInterfaceOrientationLandscapeLeft</string>
++    <string>UIInterfaceOrientationLandscapeRight</string>
++  </array>
++  <key>UISupportedInterfaceOrientations~ipad</key>
++  <array>
++    <string>UIInterfaceOrientationPortrait</string>
++    <string>UIInterfaceOrientationPortraitUpsideDown</string>
++    <string>UIInterfaceOrientationLandscapeLeft</string>
++    <string>UIInterfaceOrientationLandscapeRight</string>
++  </array>
++</dict>
++</plist>
+diff --git a/runner/src/audio_device_info.cpp b/runner/src/audio_device_info.cpp
+index bc5f201..ca3d8cb 100644
+--- a/runner/src/audio_device_info.cpp
++++ b/runner/src/audio_device_info.cpp
+@@ -3,6 +3,10 @@
+ #include <cstring>
+ 
+ #if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++
++#if defined(__APPLE__) && TARGET_OS_OSX
+ #include <CoreAudio/CoreAudio.h>
+ 
+ namespace {
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index fa3cfc4..5d67483 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -18,6 +18,7 @@
+ #include <future>
+ #include <memory>
+ #include <mutex>
++#include <pthread.h>
+ #include <thread>
+ #include <fstream>
+ #include <initializer_list>
+@@ -831,6 +832,38 @@ InputLatencyStats g_input_latency;
+ ThreadedPresenter* g_presenter = nullptr;
+ std::thread::id g_main_thread_id;
+ 
++// pthread with an explicit stack; the join() surface matches std::thread.
++class BigStackThread {
++public:
++    explicit BigStackThread(std::function<void()> fn,
++                            size_t stack_bytes = size_t{64} << 20)
++        : fn_(std::move(fn)) {
++        pthread_attr_t attr;
++        pthread_attr_init(&attr);
++        pthread_attr_setstacksize(&attr, stack_bytes);
++        started_ = pthread_create(&thread_, &attr, &BigStackThread::entry,
++                                  this) == 0;
++        pthread_attr_destroy(&attr);
++        if (!started_) fn_();  // no thread available: run inline
++    }
++    void join() {
++        if (started_) pthread_join(thread_, nullptr);
++        started_ = false;
++    }
++    ~BigStackThread() { join(); }
++    BigStackThread(const BigStackThread&) = delete;
++    BigStackThread& operator=(const BigStackThread&) = delete;
++
++private:
++    static void* entry(void* self) {
++        static_cast<BigStackThread*>(self)->fn_();
++        return nullptr;
++    }
++    std::function<void()> fn_;
++    pthread_t thread_{};
++    bool started_ = false;
++};
++
+ // Run `fn` on the main (SDL) thread. Inline when threading is off or when
+ // already on it. `wait` blocks the caller until it has run.
+ void run_on_main(std::function<void()> fn, bool wait) {
+@@ -5015,7 +5048,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             std::fprintf(stderr,
+                          "[sdl] present thread: the main thread only pumps "
+                          "input; the vsync'd present runs on its own thread\n");
+-        std::thread worker([&]() {
++        // The recompiled dispatch nests deeply (see the -stack_size note in
++        // CMakeLists.txt) and iOS secondary threads default to 512 KB, so the
++        // emulation thread gets an explicit stack.
++        BigStackThread worker([&]() {
+             sdl_set_thread_priority_high();
+             emulation_loop();
+             presenter.worker_done.store(true);
+@@ -5490,6 +5526,7 @@ uint32_t nds_frontend_frame_digests(uint64_t from, uint32_t max,
+     return copied;
+ }
+ 
++#if defined(NDS_HAVE_SDL3) || defined(NDS_HAVE_SDL2)
+ std::string nds_frontend_input_latency_json() {
+     const uint64_t n = g_input_latency.count.load();
+     char buf[200];
+@@ -5501,6 +5538,9 @@ std::string nds_frontend_input_latency_json() {
+         static_cast<unsigned long long>(g_input_latency.over_8ms.load()));
+     return buf;
+ }
++#else
++std::string nds_frontend_input_latency_json() { return "{}"; }
++#endif
+ 
+ std::string nds_frontend_audio_latency_json() {
+ #if defined(NDS_HAVE_SDL3)
+diff --git a/runner/src/ios_launch.mm b/runner/src/ios_launch.mm
+new file mode 100644
+index 0000000..cfc33df
+--- /dev/null
++++ b/runner/src/ios_launch.mm
+@@ -0,0 +1,83 @@
++// iOS/iPadOS entry point.
++//
++// SDL3's UIKit backend owns UIApplicationMain; SDL_RunApp starts it and calls
++// back on the main thread once the app is up. The runner's own main() is
++// compiled as nds_runner_main() on this platform. With no arguments (a normal
++// launch from the home screen) we synthesize the same command line the
++// desktop launcher uses, rooted in the app's Documents folder, which the user
++// reaches through the Files app (UIFileSharingEnabled).
++#import <Foundation/Foundation.h>
++#import <TargetConditionals.h>
++
++#if TARGET_OS_IOS
++
++#include <SDL3/SDL.h>
++#include <SDL3/SDL_main.h>
++
++#include <string>
++#include <vector>
++
++extern "C++" int nds_runner_main(int argc, char** argv);
++
++namespace {
++
++std::string documents_dir() {
++    NSArray* dirs = NSSearchPathForDirectoriesInDomains(
++        NSDocumentDirectory, NSUserDomainMask, YES);
++    return std::string([dirs.firstObject fileSystemRepresentation]);
++}
++
++// First *.nds in Documents, preferring a file called game.nds.
++std::string find_rom(const std::string& docs) {
++    NSFileManager* fm = [NSFileManager defaultManager];
++    NSString* nsdocs = [NSString stringWithUTF8String:docs.c_str()];
++    NSString* preferred = [nsdocs stringByAppendingPathComponent:@"game.nds"];
++    if ([fm fileExistsAtPath:preferred]) return std::string([preferred UTF8String]);
++    for (NSString* name in [fm contentsOfDirectoryAtPath:nsdocs error:nil]) {
++        if ([[name pathExtension] caseInsensitiveCompare:@"nds"] == NSOrderedSame)
++            return std::string([[nsdocs stringByAppendingPathComponent:name]
++                UTF8String]);
++    }
++    return {};
++}
++
++std::string bundle_file(const char* name, const char* ext) {
++    NSString* p = [[NSBundle mainBundle] pathForResource:[NSString stringWithUTF8String:name]
++                                                  ofType:[NSString stringWithUTF8String:ext]];
++    return p ? std::string([p UTF8String]) : std::string();
++}
++
++int run(int argc, char** argv) {
++    if (argc > 1) return nds_runner_main(argc, argv);  // explicit args win
++    const std::string docs = documents_dir();
++    chdir(docs.c_str());
++    const std::string rom = find_rom(docs);
++    if (rom.empty()) {
++        SDL_ShowSimpleMessageBox(
++            SDL_MESSAGEBOX_ERROR, "ROM not found",
++            "Copy your Rhythm Heaven .nds file into this app's folder using "
++            "the Files app (On My iPad > this app), then reopen it.",
++            nullptr);
++        return 1;
++    }
++    std::vector<std::string> a = {argv[0], ".", "--interactive", "--freebios",
++                                  "--generated-firmware", "--boot", "direct",
++                                  "--rom", rom, "--save-path",
++                                  docs + "/game.sav",
++                                  "--coverage-manifest",
++                                  docs + "/coverage-session.json"};
++    std::string cfg = bundle_file("game", "toml");
++    if (!cfg.empty()) { a.push_back("--config"); a.push_back(cfg); }
++    std::vector<char*> av;
++    for (auto& s : a) av.push_back(s.data());
++    av.push_back(nullptr);
++    return nds_runner_main(static_cast<int>(a.size()), av.data());
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++    return SDL_RunApp(argc, argv, run, nullptr);
++}
++
++#endif  // TARGET_OS_IOS
+diff --git a/runner/src/main.cpp b/runner/src/main.cpp
+index 3628f0e..94e334f 100644
+--- a/runner/src/main.cpp
++++ b/runner/src/main.cpp
+@@ -339,7 +339,16 @@ std::filesystem::path exe_dir_from_argv(const char* argv0) {
+ 
+ }  // namespace
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++#if defined(__APPLE__) && TARGET_OS_IOS && !defined(NDS_SDL_BACKEND_IS_NONE)
++// ios_launch.mm owns the real main() (SDL_RunApp / UIApplicationMain).
++int nds_runner_main(int argc, char** argv);
++int nds_runner_main(int argc, char** argv) {
++#else
+ int main(int argc, char** argv) {
++#endif
+     // stderr is the runner's diagnostic stream and is read from files by
+     // harnesses and field-bundle collectors. Under Windows UCRT a redirected
+     // stderr becomes BLOCK buffered, so a force-killed process loses its tail
+-- 
+2.54.0 (Apple Git-157)
+
