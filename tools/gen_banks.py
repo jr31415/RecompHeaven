@@ -16,6 +16,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--recompiler", required=True); ap.add_argument("--images", required=True)
 ap.add_argument("--ingest", required=True, nargs="+",
                 help="one or more ingest dirs; seeds are unioned per module (monotonic)"); ap.add_argument("--out", required=True)
+ap.add_argument("--no-page-banks", action="store_true",
+                help="skip banks built from runtime-captured pages (needs only the ROM + seed lists)")
 ap.add_argument("--all-overlays", action="store_true",
                 help="also emit every ROM overlay at its table address (entry-only discovery)")
 a = ap.parse_args()
@@ -60,7 +62,7 @@ for stem, sfs in sorted(seed_files.items()):
 
 # Runtime-materialised pages that exist nowhere in the ROM (ingest wrote bin+toml).
 page_ids = set()
-for ing in ingests:
+for ing in ([] if a.no_page_banks else ingests):
     for t in sorted((ing / "images").glob("rh_*.toml")):
         b = t.with_suffix(".bin")
         if not b.exists(): continue

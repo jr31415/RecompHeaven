@@ -1,0 +1,81 @@
+# Entry points observed in Tier-3 coverage manifests of real play sessions (addresses only).
+[[entry_point]]
+addr = 0x02380000
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380024
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380034
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380054
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380074
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380090
+mode = "arm"
+
+[[entry_point]]
+addr = 0x023800b0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x023800c8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x023800dc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380118
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380128
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380138
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380148
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380154
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380160
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380168
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380174
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02380188
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0238018c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x023801a0
+mode = "arm"
+
