@@ -1,7 +1,7 @@
 From 7f9ed29d80983c9e3ae3e0656665a055a99b18b8 Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Fri, 9 Oct 2026 21:20:58 -0700
-Subject: [PATCH 2/8] Build the runner on macOS without retail dumps; extend
+Subject: [PATCH 2/9] Build the runner on macOS without retail dumps; extend
  suite with runner stage
 
 - NDS_RETAIL_BIOS_BANKS option (default ON) for dump-free FreeBIOS builds

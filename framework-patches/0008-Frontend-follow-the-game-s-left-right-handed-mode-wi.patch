@@ -1,7 +1,7 @@
 From 62ac73a989a3e23b22db998165319b5dcd91499c Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Sat, 10 Oct 2026 11:36:33 -0700
-Subject: [PATCH 8/8] Frontend: follow the game's left/right-handed mode with a
+Subject: [PATCH 8/9] Frontend: follow the game's left/right-handed mode with a
  180-degree host rotation
 
 [display] auto_hand_rotation (or NDS_AUTO_HAND_ROTATION=1) watches OAM: in
