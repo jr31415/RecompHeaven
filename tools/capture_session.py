@@ -4,6 +4,7 @@
 Script items (JSON list via --script file or inline):
   {"run": 700}                         run to ARM9 VBlank count
   {"touch": [x, y], "hold": 6}         press the stylus for `hold` VBlanks, release
+  {"swipe": [[x0,y0],[x1,y1]], "frames": 4}   stylus drag then release
   {"keys": 0x0001, "hold": 6}          DS key mask (A=1,B=2,Sel=4,Start=8,R=0x10..)
   {"shot": "name"}                     save both screens as PNG
   {"manifest": "path.json"}            write the Tier-3 coverage manifest now
@@ -50,6 +51,16 @@ try:
         elif "touch" in it:
             call(cmd="touch", x=it["touch"][0], y=it["touch"][1], down=True)
             run_to(vb + it.get("hold", 6)); call(cmd="touch", x=it["touch"][0], y=it["touch"][1], down=False)
+        elif "down" in it:
+            call(cmd="touch", x=it["down"][0], y=it["down"][1], down=True); run_to(vb + it.get("hold", 1))
+        elif "up" in it:
+            call(cmd="touch", x=0, y=0, down=False); run_to(vb + it.get("hold", 1))
+        elif "swipe" in it:
+            (x0, y0), (x1, y1) = it["swipe"]; n = max(2, it.get("frames", 4))
+            for k in range(n + 1):
+                x = round(x0 + (x1 - x0) * k / n); y = round(y0 + (y1 - y0) * k / n)
+                call(cmd="touch", x=x, y=y, down=True); run_to(vb + 1)
+            call(cmd="touch", x=x1, y=y1, down=False)
         elif "keys" in it:
             call(cmd="keys", mask=it["keys"]); run_to(vb + it.get("hold", 6)); call(cmd="keys", mask=0)
         elif "shot" in it:
@@ -61,6 +72,9 @@ try:
             print("manifest", call(cmd="coverage_manifest", path=it["manifest"]))
         elif "digest" in it:
             ev = call(cmd="event_counts"); print("events", {k: ev[k] for k in ("vblank9","vblank7","insn9","insn7") if k in ev})
+        elif "tier3" in it:
+            r = call(cmd="tier3_coverage", max=it.get("max", 4000))
+            Path(it["tier3"]).write_text(json.dumps(r)); print("tier3 entries", len(r.get("entries", [])))
         elif "cov" in it:
             print("static_coverage", json.dumps(call(cmd="static_coverage"))[:600])
 finally:
