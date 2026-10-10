@@ -14,3 +14,8 @@ out/
 *.app/
 __pycache__/
 .DS_Store
+
+# ROM-derived intermediates
+images/
+coverage/
+frames/

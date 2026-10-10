@@ -15,3 +15,23 @@ host settings, `docs/` title notes. `generated/` is ignored.
 
 Not yet pinned to the framework as a submodule: that happens once the
 framework's portability changes are pushed.
+
+## Pipeline (macOS arm64 verified 2026-10-09)
+
+```
+# 0. framework recompiler + dump-free runner (see framework docs/rhythm-heaven-plan.md Phase 1)
+python tools/prepare_images.py --rom ROM --out images/             # arm9/arm7/overlays/autoload
+python tools/capture_session.py --runner R --rom ROM --work W --out frames/ \
+       --script session.json                                       # headless scripted session
+#    ... include {"manifest": "coverage/title.json"} in the script
+python $NDSRECOMP/tools/ingest_coverage_manifests.py coverage/*.json \
+       --images images/ --out ingest/ --bank-prefix rh             # aliases, seeds, page banks
+python tools/gen_banks.py --recompiler nds_recompile --images images/ \
+       --ingest ingest/ --out titlebanks/ [--all-overlays]         # content-validated banks
+cmake ... -DNDS_TITLE_BANK_DIR=titlebanks -DNDS_TITLE_ROM_SHA1=601b92b1...
+```
+
+Differential used as the correctness gate here: run the same script on the
+all-interpreted runner and the banked runner; frame hashes and `insn9/insn7`
+at the same VBlank counts must match, and `static_coverage` Tier-3 counters
+should fall to ~0.
