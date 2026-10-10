@@ -1,7 +1,7 @@
 From 29b3a9f18476ab272a1b184a9a90f62adb0cfe0c Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Sat, 10 Oct 2026 12:23:58 -0700
-Subject: [PATCH 10/10] Audio latency: sub-frame pushes, precise pacing,
+Subject: [PATCH 10/11] Audio latency: sub-frame pushes, precise pacing,
  CoreAudio IO buffer, adaptive floor, probe
 
 - push audio 16x per DS frame; pace with proportional precise sleeps

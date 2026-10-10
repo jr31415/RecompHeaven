@@ -1,0 +1,420 @@
+From 3eae36bf0625df7392e02e4db1ecd079f654de13 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Sat, 10 Oct 2026 13:22:15 -0700
+Subject: [PATCH 11/11] Input: apply between scheduler rounds, optional present
+ thread, latency probe
+
+- drain input every round (threaded) / audio chunk (single thread), not only
+  at the frame boundary
+- NDS_PRESENT_THREAD=1: vsync'd present on its own thread; main thread only
+  pumps events (SDL_WaitEventTimeout 1 ms)
+- input_latency debug command + NDS_INPUT_TEST_PRESSES self-injection
+- adaptive audio floor starts at 768 and decays (cold boot underran at 192)
+
+Measured pickup-to-guest: 8.5 ms mean / 16.7 ms max -> 0.5 ms / 2.0 ms.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ docs/audio_latency.md       |  28 +++++
+ runner/src/debug_server.cpp |   2 +
+ runner/src/frontend.cpp     | 212 +++++++++++++++++++++++++++++++-----
+ runner/src/frontend.h       |   2 +
+ 4 files changed, 218 insertions(+), 26 deletions(-)
+
+diff --git a/docs/audio_latency.md b/docs/audio_latency.md
+index 3068d25..3c2f2f3 100644
+--- a/docs/audio_latency.md
++++ b/docs/audio_latency.md
+@@ -42,3 +42,31 @@ CoreAudio. It is not an acoustic loopback.
+ | `NDS_AUDIO_TEST` | 0 | probe mode: mute game, inject clicks |
+ 
+ `audio_latency` over the debug protocol returns the probe report.
++
++## Input latency
++
++Input used to be applied once per frame by the emulation thread, and (in the
++threaded presenter) the main thread, which receives OS events, spent most of
++each frame blocked in the vsync present. Now:
++
++- the emulation loop applies input between scheduler rounds (threaded) or per
++  audio chunk (single thread), not just at the frame boundary;
++- `NDS_PRESENT_THREAD=1` moves the vsync'd present to its own thread so the
++  main thread only pumps input (~1 ms pickup, independent of present time).
++
++Measured with `tools/test_input_delay.py` (title repo), 80 jittered presses
++injected by an independent thread, pickup to applied-to-guest:
++
++| mode | mean | max |
++|---|---|---|
++| per-frame (old behaviour) | 8.5 ms | 16.7 ms |
++| single thread, per audio chunk | 0.7 ms | 2.4 ms |
++| threaded, main pumps between presents | 1.4 ms | 3.3 ms |
++| present thread | 0.5 ms | 2.0 ms |
++
++This is host pickup only. The guest still polls input about once per frame, so
++the game itself sees a press within one frame at worst.
++
++The adaptive audio floor now starts at 768 frames and decays 32 frames per 2 s
++once clean for 4 s: the cold-boot frames are slow and a low floor underruns
++there.
+diff --git a/runner/src/debug_server.cpp b/runner/src/debug_server.cpp
+index d6b91b0..8cbba6a 100644
+--- a/runner/src/debug_server.cpp
++++ b/runner/src/debug_server.cpp
+@@ -1283,6 +1283,8 @@ std::string handle(const std::string& line) {
+     }
+     if (cmd == "audio_latency")
+         return nds_frontend_audio_latency_json();
++    if (cmd == "input_latency")
++        return nds_frontend_input_latency_json();
+     if (cmd == "frontend_exit") {
+         const bool requested = nds_frontend_request_exit();
+         return "{\"requested\":" +
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index 6400a24..fa3cfc4 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -811,11 +811,23 @@ struct ThreadedPresenter {
+     float stylus_y = 0.0f;
+     std::string notice;
+     std::atomic<bool> worker_done{false};
++    std::atomic<uint32_t> event_seq{0};            // bumped per queued event
++    std::deque<std::function<void()>> present_tasks;  // worker -> presenter thread
++    bool present_thread = false;
+     std::atomic<uint64_t> last_swap_ticks{0};
+     std::atomic<uint64_t> last_present_ticks{0};
+     std::atomic<uint64_t> presented{0};
+ };
+ bool sdl_set_relative_mouse_mode_impl(SDL_Window* window, bool enabled);
++// Input latency: SDL stamps each event when the OS delivers it; the worker
++// records how long until it was applied to the guest. Press/touch events only.
++struct InputLatencyStats {
++    std::atomic<uint64_t> count{0};
++    std::atomic<uint64_t> total_ns{0};
++    std::atomic<uint64_t> max_ns{0};
++    std::atomic<uint64_t> over_8ms{0};
++};
++InputLatencyStats g_input_latency;
+ ThreadedPresenter* g_presenter = nullptr;
+ std::thread::id g_main_thread_id;
+ 
+@@ -847,6 +859,27 @@ void run_on_main(std::function<void()> fn, bool wait) {
+     finished.wait();
+ }
+ 
++// Run `fn` on the thread that owns the renderer: the dedicated presenter thread
++// when NDS_PRESENT_THREAD is on, otherwise the main thread.
++void run_on_presenter(std::function<void()> fn, bool wait) {
++    if (!g_presenter || !g_presenter->present_thread) {
++        run_on_main(std::move(fn), wait);
++        return;
++    }
++    auto done = std::make_shared<std::promise<void>>();
++    std::future<void> finished = done->get_future();
++    {
++        std::lock_guard<std::mutex> lock(g_presenter->mutex);
++        g_presenter->present_tasks.push_back(
++            [fn = std::move(fn), done]() mutable {
++                fn();
++                done->set_value();
++            });
++    }
++    g_presenter->cv.notify_all();
++    if (wait) finished.wait();
++}
++
+ bool sdl_set_relative_mouse_mode(SDL_Window* window, bool enabled) {
+     bool ok = false;
+     run_on_main([&]() { ok = sdl_set_relative_mouse_mode_impl(window, enabled); },
+@@ -2707,11 +2740,17 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     // underrun burst (a stall longer than the queue covers: scene loads, cold
+     // dispatch), and decay back slowly while clean. NDS_AUDIO_ADAPTIVE=0 pins
+     // the minimum.
++    // Start conservatively: the cold-boot frames are slow and a low floor
++    // underruns there. It decays to the configured minimum once the game has
++    // run clean for a few seconds.
+     uint32_t audio_target_now = audio_queue_target;
+     const uint32_t audio_target_cap = std::max<uint32_t>(1024, audio_queue_target);
+     bool audio_adaptive = true;
+     if (const char* env = std::getenv("NDS_AUDIO_ADAPTIVE"))
+         audio_adaptive = env[0] != '0';
++    if (audio_adaptive)
++        audio_target_now = std::min<uint32_t>(
++            audio_target_cap, std::max<uint32_t>(audio_queue_target, 768));
+     uint64_t adaptive_last_underruns = 0;
+     uint64_t adaptive_last_change = SDL_GetPerformanceCounter();
+     // Sub-frame audio pushes per DS frame (1 = the old once-per-frame push).
+@@ -3402,6 +3441,27 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     }
+     ThreadedPresenter presenter;
+     g_main_thread_id = std::this_thread::get_id();
++    // Self-injection for the input-latency test (NDS_INPUT_TEST_PRESSES=N): an
++    // independent thread pushes N jittered Q presses into SDL's queue, the way
++    // the OS delivers events asynchronously, regardless of what the emulation
++    // or main thread is blocked on. Stats come from `input_latency`.
++    if (const char* env = std::getenv("NDS_INPUT_TEST_PRESSES")) {
++        const int presses = std::atoi(env);
++        if (presses > 0) {
++            std::thread([presses]() {
++                std::this_thread::sleep_for(std::chrono::seconds(8));
++                uint32_t rng = 12345;
++                for (int i = 0; i < presses; ++i) {
++                    nds_frontend_debug_key("q", true, false);
++                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
++                    nds_frontend_debug_key("q", false, false);
++                    rng = rng * 1664525u + 1013904223u;
++                    std::this_thread::sleep_for(std::chrono::microseconds(
++                        30000 + (rng >> 8) % 90000));
++                }
++            }).detach();
++        }
++    }
+     if (threaded) {
+         g_presenter = &presenter;
+         std::fprintf(stderr,
+@@ -3410,7 +3470,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     }
+     auto apply_governor_stage = [&](uint8_t stage) -> bool {
+         bool ok = false;
+-        run_on_main([&]() {
++        run_on_presenter([&]() {
+             ok = apply_performance_governor_stage(options, presentation, stage);
+         }, true);
+         return ok;
+@@ -3629,6 +3689,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                 relative_mouse_selftest_stage = 10;
+             }
+         }
++        // Input is drained here at the top of the frame AND between scheduler
++        // rounds inside the frame (see the chunk loop below), so a key or touch
++        // reaches the guest within microseconds of arriving instead of waiting
++        // for the next frame boundary.
++        auto drain_input_events = [&]() {
+         SDL_Event event{};
+         auto next_event = [&]() -> bool {
+             if (!threaded) return SDL_PollEvent(&event);
+@@ -3639,6 +3704,23 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             return true;
+         };
+         while (next_event()) {
++            if (event.type == SDL_KEYDOWN || event.type == SDL_MOUSEBUTTONDOWN) {
++                const uint64_t stamp =
++                    static_cast<uint64_t>(event.common.timestamp);
++                const uint64_t now_ns = SDL_GetTicksNS();
++                if (stamp && now_ns >= stamp) {
++                    const uint64_t d = now_ns - stamp;
++                    g_input_latency.count.fetch_add(1, std::memory_order_relaxed);
++                    g_input_latency.total_ns.fetch_add(d, std::memory_order_relaxed);
++                    uint64_t prev = g_input_latency.max_ns.load(
++                        std::memory_order_relaxed);
++                    while (d > prev &&
++                           !g_input_latency.max_ns.compare_exchange_weak(prev, d)) {}
++                    if (d > 8000000ull)
++                        g_input_latency.over_8ms.fetch_add(
++                            1, std::memory_order_relaxed);
++                }
++            }
+             if (!threaded) {
+                 convert_mouse_event_to_logical_coordinates(event, presentation);
+                 unrotate_mouse_event(event, presentation);
+@@ -4120,6 +4202,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                     nds_set_touch(0, 0, false);
+             }
+         }
++        };  // drain_input_events
++        drain_input_events();
++        uint32_t seen_event_seq = presenter.event_seq.load(std::memory_order_relaxed);
+         if (focus_release_pending) {
+             if (!any_presentation_window_focused()) {
+                 release_relative_mouse();
+@@ -4434,10 +4519,22 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                !(scheduler_cpu_terminal_halted(0) &&
+                  scheduler_cpu_terminal_halted(1))) {
+             scheduler_run_round();
++            // Input between rounds. Threaded: the main thread bumps
++            // event_seq when it queues an event; a relaxed load per round is
++            // effectively free. Single-threaded: poll once per audio chunk.
++            if (threaded) {
++                const uint32_t es =
++                    presenter.event_seq.load(std::memory_order_relaxed);
++                if (es != seen_event_seq) {
++                    seen_event_seq = es;
++                    drain_input_events();
++                }
++            }
+             if (audio_chunks_per_frame > 1 && audio && !turbo_active &&
+                 scheduler_system_timestamp() >= next_audio_chunk) {
+                 next_audio_chunk = scheduler_system_timestamp() +
+                                    audio_chunk_cycles;
++                if (!threaded && running) drain_input_events();
+                 push_audio(audio, audio_queue, audio_started,
+                            audio_queue_error);
+                 if (audio_started)
+@@ -4702,10 +4799,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                                  audio_target_now * 1000.0 / kAudioFrequency);
+                 }
+             } else if (audio_target_now > audio_queue_target &&
+-                       (t - adaptive_last_change) > frequency * 10u) {
++                       (t - adaptive_last_change) > frequency * 4u) {
+                 audio_target_now = std::max(audio_queue_target,
+-                                            audio_target_now - 16u);
+-                adaptive_last_change = t - frequency * 5u;  // next step in 5 s
++                                            audio_target_now - 32u);
++                adaptive_last_change = t - frequency * 2u;  // next step in 2 s
+             }
+         }
+         constexpr uint32_t kGlideStepFrames = 300;
+@@ -4912,6 +5009,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     };  // emulation_loop
+ 
+     if (threaded) {
++        if (const char* env = std::getenv("NDS_PRESENT_THREAD"))
++            presenter.present_thread = env[0] == '1';
++        if (presenter.present_thread)
++            std::fprintf(stderr,
++                         "[sdl] present thread: the main thread only pumps "
++                         "input; the vsync'd present runs on its own thread\n");
+         std::thread worker([&]() {
+             sdl_set_thread_priority_high();
+             emulation_loop();
+@@ -4925,31 +5028,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         float stylus_x = 0.0f;
+         float stylus_y = 0.0f;
+         std::string notice;
+-        for (;;) {
+-            SDL_Event queued_event{};
+-            while (SDL_PollEvent(&queued_event)) {
+-                convert_mouse_event_to_logical_coordinates(queued_event,
+-                                                           presentation);
+-                unrotate_mouse_event(queued_event, presentation);
+-                std::lock_guard<std::mutex> lock(presenter.mutex);
+-                presenter.events.push_back(queued_event);
+-            }
+-            for (;;) {
+-                std::function<void()> task;
+-                {
+-                    std::lock_guard<std::mutex> lock(presenter.mutex);
+-                    if (presenter.tasks.empty()) break;
+-                    task = std::move(presenter.tasks.front());
+-                    presenter.tasks.pop_front();
+-                }
+-                task();
+-            }
+-            if (presenter.worker_done.load()) break;
++        // Pull the newest published frame (if any) and present it. Shared by
++        // the single presenter-owning thread in both modes.
++        auto present_latest = [&]() {
+             bool have_frame = false;
+             {
+                 std::unique_lock<std::mutex> lock(presenter.mutex);
+-                if (presenter.seq == seen && presenter.tasks.empty())
+-                    presenter.cv.wait_for(lock, std::chrono::milliseconds(2));
+                 if (presenter.seq != seen) {
+                     local[0] = presenter.pix[0];
+                     local[1] = presenter.pix[1];
+@@ -4975,6 +5059,70 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                     t.upload + t.draw + t.swap, std::memory_order_relaxed);
+                 presenter.presented.fetch_add(1, std::memory_order_relaxed);
+             }
++        };
++        auto run_tasks = [&](std::deque<std::function<void()>>& queue) {
++            for (;;) {
++                std::function<void()> task;
++                {
++                    std::lock_guard<std::mutex> lock(presenter.mutex);
++                    if (queue.empty()) break;
++                    task = std::move(queue.front());
++                    queue.pop_front();
++                }
++                task();
++            }
++        };
++        auto queue_pending_events = [&](SDL_Event& e) {
++            convert_mouse_event_to_logical_coordinates(e, presentation);
++            unrotate_mouse_event(e, presentation);
++            {
++                std::lock_guard<std::mutex> lock(presenter.mutex);
++                presenter.events.push_back(e);
++            }
++            presenter.event_seq.fetch_add(1, std::memory_order_relaxed);
++        };
++
++        if (presenter.present_thread) {
++            // Present thread: owns the renderer and blocks in vsync freely.
++            std::thread present_thread([&]() {
++                for (;;) {
++                    run_tasks(presenter.present_tasks);
++                    present_latest();
++                    std::unique_lock<std::mutex> lock(presenter.mutex);
++                    if (presenter.worker_done.load() &&
++                        presenter.seq == seen) break;
++                    if (presenter.seq == seen && presenter.present_tasks.empty())
++                        presenter.cv.wait_for(lock,
++                                              std::chrono::milliseconds(2));
++                }
++            });
++            // Main thread: input only, ~1 ms pickup latency regardless of
++            // how long a present blocks.
++            for (;;) {
++                SDL_Event e{};
++                if (SDL_WaitEventTimeout(&e, 1)) {
++                    do {
++                        queue_pending_events(e);
++                    } while (SDL_PollEvent(&e));
++                }
++                run_tasks(presenter.tasks);
++                if (presenter.worker_done.load()) break;
++            }
++            present_thread.join();
++        } else {
++            for (;;) {
++                SDL_Event e{};
++                while (SDL_PollEvent(&e)) queue_pending_events(e);
++                run_tasks(presenter.tasks);
++                if (presenter.worker_done.load()) break;
++                {
++                    std::unique_lock<std::mutex> lock(presenter.mutex);
++                    if (presenter.seq == seen && presenter.tasks.empty())
++                        presenter.cv.wait_for(lock,
++                                              std::chrono::milliseconds(2));
++                }
++                present_latest();
++            }
+         }
+         worker.join();
+         g_presenter = nullptr;
+@@ -5342,6 +5490,18 @@ uint32_t nds_frontend_frame_digests(uint64_t from, uint32_t max,
+     return copied;
+ }
+ 
++std::string nds_frontend_input_latency_json() {
++    const uint64_t n = g_input_latency.count.load();
++    char buf[200];
++    std::snprintf(buf, sizeof(buf),
++        "{\"events\":%llu,\"mean_ms\":%.3f,\"max_ms\":%.3f,\"over_8ms\":%llu}",
++        static_cast<unsigned long long>(n),
++        n ? g_input_latency.total_ns.load() / 1e6 / static_cast<double>(n) : 0.0,
++        g_input_latency.max_ns.load() / 1e6,
++        static_cast<unsigned long long>(g_input_latency.over_8ms.load()));
++    return buf;
++}
++
+ std::string nds_frontend_audio_latency_json() {
+ #if defined(NDS_HAVE_SDL3)
+     return audio_latency_json();
+diff --git a/runner/src/frontend.h b/runner/src/frontend.h
+index 94d593e..673b875 100644
+--- a/runner/src/frontend.h
++++ b/runner/src/frontend.h
+@@ -433,6 +433,8 @@ void nds_frontend_live_stats(NdsFrontendLiveStats* out);
+ // JSON report from the audio latency probe (NDS_AUDIO_TEST=1); see
+ // docs/audio_latency.md. Safe to call from any thread.
+ std::string nds_frontend_audio_latency_json();
++// Delay from OS delivery of a key/click to it being applied to the guest.
++std::string nds_frontend_input_latency_json();
+ 
+ // SDL-event injection and counters for play-mode TCP validation. These
+ // commands intentionally enter through the frontend's normal event path, so
+-- 
+2.54.0 (Apple Git-157)
+

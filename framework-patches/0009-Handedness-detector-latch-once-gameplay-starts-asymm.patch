@@ -1,7 +1,7 @@
 From 493754738f800790b21f65b424c2f4bfca2247fe Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Sat, 10 Oct 2026 11:57:29 -0700
-Subject: [PATCH 09/10] Handedness detector: latch once gameplay starts;
+Subject: [PATCH 09/11] Handedness detector: latch once gameplay starts;
  asymmetric evidence
 
 The first version re-voted every frame and reverted to right-handed inside

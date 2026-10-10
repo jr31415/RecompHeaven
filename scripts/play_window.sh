@@ -21,6 +21,9 @@ mkdir -p "$SAVEDIR" "$HOME/dev/rh-build/play" "$HOME/dev/rh-build/coverage"
 cd "$HOME/dev/rh-build/play"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 export NDS_THREADED_PRESENT="${NDS_THREADED_PRESENT:-1}"
+# Present on its own thread so the main thread pumps input every ~1 ms even
+# while a vsync present blocks (set 0 if the window misbehaves).
+export NDS_PRESENT_THREAD="${NDS_PRESENT_THREAD:-1}"
 export NDS_FRAME_LOG="$HOME/dev/rh-build/play/frame_times-$STAMP.csv"
 exec "$RUNNER" . --interactive --freebios --generated-firmware --boot direct \
   --rom "$ROM" --config "$HERE/game.toml" \
