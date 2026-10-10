@@ -1,0 +1,16 @@
+# ROM-derived or Nintendo-owned material: never commit
+*.nds
+*.dsi
+*.srl
+*.sav
+bios/*.rom
+bios/*.bin
+generated/
+build/
+build-*/
+out/
+*.ipa
+*.exe
+*.app/
+__pycache__/
+.DS_Store

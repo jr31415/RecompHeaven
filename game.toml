@@ -1,0 +1,13 @@
+# Host/runtime settings for Rhythm Heaven (US). Read by the runner via --config.
+[game]
+sha1 = "601b92b1603f1822543e264df55ab4152ded356c"
+
+[display]
+screen_layout = "stacked"   # stacked | separate
+
+[system]
+startup_mode = "automatic"  # real BIOS/firmware/card path, no menu navigation
+
+# [cartridge]
+# save_type / save_size: UNKNOWN. Determine from melonDS's game database or
+# observed AUXSPI traffic before enabling; do not rely on the 8 KiB default.
