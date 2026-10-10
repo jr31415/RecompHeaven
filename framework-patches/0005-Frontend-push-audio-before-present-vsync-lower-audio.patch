@@ -1,0 +1,345 @@
+From 1fd60dc453f4cd03b6635a8878a983b03316ff65 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Fri, 9 Oct 2026 22:13:22 -0700
+Subject: [PATCH 5/6] Frontend: push audio before present, vsync, lower audio
+ queue, frame-time ring
+
+- push_audio/throttle_audio split: a frame's audio reaches the device before
+  the (vsync-blocking) present instead of behind it
+- display vsync on the stacked/top renderer (NDS_VSYNC=0 opts out)
+- steady-state audio queue target 2048 -> 1024 frames, NDS_AUDIO_QUEUE_FRAMES
+- always-on per-frame timing ring dumped to NDS_FRAME_LOG / frame_times.csv
+- Space and P as Start aliases
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runner/src/frontend.cpp | 190 +++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 168 insertions(+), 22 deletions(-)
+
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index 90683ba..5373258 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -29,6 +29,7 @@
+ #include "scheduler.h"
+ #include "savestate_slots.h"
+ #include "spu.h"
++#include "tier3.h"
+ #include "title_patches.h"
+ #if defined(NDS_HAVE_COMPUTE_RENDERER)
+ #include "melonds_compute/ComputeHost.h"
+@@ -874,6 +875,8 @@ uint16_t key_bit(SDL_Scancode key) {
+         case SDL_SCANCODE_X:         return 1u << 1;  // B
+         case SDL_SCANCODE_BACKSPACE: return 1u << 2;  // Select
+         case SDL_SCANCODE_RETURN:    return 1u << 3;  // Start
++        case SDL_SCANCODE_SPACE:     return 1u << 3;  // Start (alias)
++        case SDL_SCANCODE_P:         return 1u << 3;  // Start (alias, pause)
+         case SDL_SCANCODE_RIGHT:     return 1u << 4;
+         case SDL_SCANCODE_LEFT:      return 1u << 5;
+         case SDL_SCANCODE_UP:        return 1u << 6;
+@@ -967,9 +970,13 @@ uint32_t audio_queue_count(const NdsAudioDevice& device, AudioQueue& queue) {
+ #endif
+ }
+ 
+-uint32_t drain_audio(const NdsAudioDevice& device, AudioQueue& queue,
+-                     bool throttle, uint32_t pace_floor, bool& queue_error) {
+-    if (!device) return 0;
++// Hand every SPU block produced so far to the audio device. Split from the
++// pacing sleep (throttle_audio) so the caller can push a frame's audio the
++// moment it is emulated, BEFORE a vsync-blocking present, instead of behind it.
++// Returns false on a hard queue error.
++bool push_audio(const NdsAudioDevice& device, AudioQueue& queue,
++                bool throttle, bool& queue_error) {
++    if (!device) return true;
+     std::array<int16_t, 2048> samples{};
+     for (;;) {
+         const uint32_t frames = nds_spu_read_output(samples.data(), 1024);
+@@ -985,7 +992,7 @@ uint32_t drain_audio(const NdsAudioDevice& device, AudioQueue& queue,
+                     pushed = true;
+                 } else {
+                     queue_error = true;
+-                    return audio_queue_count(device, queue);
++                    return false;
+                 }
+             }
+ #else
+@@ -1008,12 +1015,18 @@ uint32_t drain_audio(const NdsAudioDevice& device, AudioQueue& queue,
+             if (!pushed) {
+                 if (!throttle) {
+                     queue_error = true;
+-                    return audio_queue_count(device, queue);
++                    return false;
+                 }
+                 SDL_Delay(1);
+             }
+         }
+     }
++    return true;
++}
++
++uint32_t throttle_audio(const NdsAudioDevice& device, AudioQueue& queue,
++                        bool throttle, uint32_t pace_floor) {
++    if (!device) return 0;
+     // Audio is the host's real-time clock. Never drop a produced block: if the
+     // emulator is faster than the DS cadence, let SDL consume the backlog
+     // before emulating another frame. pace_floor is the current allowance:
+@@ -1030,6 +1043,49 @@ uint32_t drain_audio(const NdsAudioDevice& device, AudioQueue& queue,
+     return queued;
+ }
+ 
++uint32_t drain_audio(const NdsAudioDevice& device, AudioQueue& queue,
++                     bool throttle, uint32_t pace_floor, bool& queue_error) {
++    if (!device) return 0;
++    if (!push_audio(device, queue, throttle, queue_error))
++        return audio_queue_count(device, queue);
++    return throttle_audio(device, queue, throttle, pace_floor);
++}
++
++// Steady-state audio queue target in 32768 Hz frames: the pacing floor, and so
++// the host-side audio latency. The old fixed 2048 (~63 ms) was tuned for crackle
++// safety on a loop that presented before it pushed audio. Rhythm games need the
++// sound as early as possible; override with NDS_AUDIO_QUEUE_FRAMES (256..4096).
++uint32_t audio_queue_target_frames() {
++    uint32_t value = 1024;
++    if (const char* env = std::getenv("NDS_AUDIO_QUEUE_FRAMES")) {
++        const long parsed = std::strtol(env, nullptr, 10);
++        if (parsed >= 256 && parsed <= 4096)
++            value = static_cast<uint32_t>(parsed);
++        else
++            std::fprintf(stderr,
++                         "[sdl] ignoring NDS_AUDIO_QUEUE_FRAMES=%s "
++                         "(expected 256..4096)\n", env);
++    }
++    return value;
++}
++
++// Per-frame host timing, recorded always-on in a ring and dumped at exit
++// (NDS_FRAME_LOG, default ./frame_times.csv). Stutter is diagnosed from this,
++// not guessed: each row says where the frame's wall time went and whether the
++// interpreter ran.
++struct FrameTimeRecord {
++    uint32_t frame = 0;
++    uint32_t total_us = 0;     // wall time since the previous record
++    uint32_t emu_us = 0;
++    uint32_t push_us = 0;      // handing audio to the device
++    uint32_t present_us = 0;   // upload + draw + swap (vsync wait is here)
++    uint32_t swap_us = 0;      // SDL_RenderPresent only
++    uint32_t throttle_us = 0;  // audio pacing sleep
++    uint32_t queued = 0;       // audio frames queued after pacing
++    uint32_t tier3_insns = 0;  // interpreter instructions this frame (9+7)
++    uint32_t underruns = 0;    // cumulative
++};
++
+ void clear_audio_queue(const NdsAudioDevice& device, AudioQueue& queue) {
+     if (!device) return;
+ #if defined(NDS_HAVE_SDL3)
+@@ -1873,6 +1929,22 @@ bool create_presentation(const NdsFrontendOptions& options,
+             destroy_presentation(presentation);
+             return false;
+         }
++#if defined(NDS_HAVE_SDL3)
++        // Display vsync on the frame present only (tearing fix). Audio pacing
++        // is independent of it: the frame's audio is pushed before this
++        // present blocks. NDS_VSYNC=0 restores immediate presents.
++        const char* vsync_env = std::getenv("NDS_VSYNC");
++        const bool want_vsync = !(vsync_env && vsync_env[0] == '0');
++        if (want_vsync) {
++            if (SDL_SetRenderVSync(presentation.renderers[0], 1))
++                std::fprintf(stderr, "[sdl] vsync: on\n");
++            else
++                std::fprintf(stderr, "[sdl] vsync unavailable: %s\n",
++                             SDL_GetError());
++        } else {
++            std::fprintf(stderr, "[sdl] vsync: off (NDS_VSYNC=0)\n");
++        }
++#endif
+     }
+ 
+     if (presentation.separate) {
+@@ -2316,7 +2388,15 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     // still holds a comfortable runway (half the steady-state target, ~31 ms).
+     // At or below that the loop is not keeping up and the synthetic present is
+     // skipped for that frame. Nothing in this path ever sleeps or busy-loops.
+-    constexpr uint32_t kInterpolationAudioFloorFrames = kAudioQueueFrames / 2;
++    const uint32_t audio_queue_target = audio_queue_target_frames();
++    std::fprintf(stderr, "[sdl] audio queue target=%u frames (~%.1f ms)\n",
++                 audio_queue_target, audio_queue_target * 1000.0 / 32768.0);
++    constexpr uint32_t kRecordRing = 1u << 16;
++    std::vector<FrameTimeRecord> frame_ring(kRecordRing);
++    uint64_t frame_ring_count = 0;
++    uint64_t record_prev_tick = SDL_GetPerformanceCounter();
++    uint64_t record_prev_tier3 = 0;
++    const uint32_t kInterpolationAudioFloorFrames = audio_queue_target / 2;
+     int interpolation_min_refresh_hz = kInterpolationMinRefreshHz;
+     if (const uint64_t forced_min_refresh =
+             environment_u64("NDS_FRAME_INTERPOLATION_MIN_REFRESH")) {
+@@ -2376,7 +2456,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     std::fprintf(stderr,
+         "[sdl] controls: gamepad=Player 1 | bottom mouse=touch | "
+         "arrows=D-pad | Z=A X=B | A=Y S=X | Q=L W=R | "
+-        "Enter=Start Backspace=Select | Esc=settings%s\n",
++        "Enter/Space/P=Start Backspace=Select | Esc=settings%s\n",
+         options.tab_turbo ? " | hold Tab=turbo" : "");
+     if (options.relative_mouse_touch) {
+         std::fprintf(stderr,
+@@ -2861,7 +2941,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         if (!was_open && runtime_menu_open())
+             clear_gameplay_input_for_runtime_menu();
+     };
+-    uint32_t audio_pace_floor = kAudioQueueFrames;
++    uint32_t audio_pace_floor = audio_queue_target;
+     uint32_t audio_min_queue = std::numeric_limits<uint32_t>::max();
+     uint32_t audio_max_queue = 0;
+     uint64_t host_key_presses = 0;
+@@ -2972,8 +3052,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             clear_audio_queue(audio, audio_queue);
+             audio_queue.started.store(false, std::memory_order_relaxed);
+             audio_started = false;
+-            audio_start_threshold = kAudioQueueFrames;
+-            audio_pace_floor = kAudioQueueFrames;
++            audio_start_threshold = audio_queue_target;
++            audio_pace_floor = audio_queue_target;
+             audio_presentation_epoch = current_audio_epoch;
+         }
+         if (selftest_menu) {
+@@ -3833,7 +3913,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                 audio_queue.started.store(false, std::memory_order_relaxed);
+             }
+             audio_started = false;
+-            audio_start_threshold = kAudioQueueFrames;
++            audio_start_threshold = audio_queue_target;
+             audio_pace_floor = audio_start_threshold;
+             audio_min_queue = std::numeric_limits<uint32_t>::max();
+             audio_max_queue = 0;
+@@ -3948,6 +4028,17 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             touch_release_pending = false;
+         }
+ 
++        // Latency: this frame's audio goes to the device NOW, before the
++        // present, which may block on vsync for up to a display period. Audio
++        // is the pacing clock and must never wait behind a delayed frame.
++        uint64_t frame_push_ticks = 0;
++        if (turbo_active) {
++            discard_spu_output();
++        } else {
++            const uint64_t push_start = SDL_GetPerformanceCounter();
++            push_audio(audio, audio_queue, audio_started, audio_queue_error);
++            frame_push_ticks = SDL_GetPerformanceCounter() - push_start;
++        }
+         const uint64_t phase1 = SDL_GetPerformanceCounter();
+         const uint32_t* const native_top = nds_gpu2d_framebuffer(0);
+         const uint32_t* top_pixels = native_top;
+@@ -4051,20 +4142,19 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         // 63 ms target, shedding the extra startup latency over a couple of
+         // seconds without ever forcing the queue down during a slow stretch.
+         constexpr uint32_t kGlideStepFrames = 300;
+-        if (audio_pace_floor > kAudioQueueFrames + kGlideStepFrames)
++        if (audio_pace_floor > audio_queue_target + kGlideStepFrames)
+             audio_pace_floor -= kGlideStepFrames;
+         else
+-            audio_pace_floor = kAudioQueueFrames;
++            audio_pace_floor = audio_queue_target;
+         uint32_t queued = audio_queue_count(audio, audio_queue);
+-        if (turbo_active) {
+-            discard_spu_output();
+-        } else {
+-            queued = drain_audio(
+-                audio, audio_queue, audio_started, audio_pace_floor,
+-                audio_queue_error);
++        if (!turbo_active) {
++            queued = throttle_audio(
++                audio, audio_queue, audio_started, audio_pace_floor);
+         }
+-        const uint64_t frame_drain_ticks =
++        const uint64_t frame_throttle_ticks =
+             SDL_GetPerformanceCounter() - phase2;
++        const uint64_t frame_drain_ticks =
++            frame_throttle_ticks + frame_push_ticks;
+         phase_drain_ticks += frame_drain_ticks;
+         audio_max_queue = std::max(audio_max_queue, queued);
+         if (audio && !audio_started && !turbo_active &&
+@@ -4096,9 +4186,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         governor_sample.emu_ms =
+             static_cast<double>(frame_emu_ticks) * 1000.0 /
+             static_cast<double>(frequency);
++        // A vsync-blocked swap is pacing headroom exactly like the audio
++        // sleep: the host was idle, not the emulator running out of time.
+         governor_sample.drain_ms =
+-            static_cast<double>(frame_drain_ticks) * 1000.0 /
+-            static_cast<double>(frequency);
++            static_cast<double>(frame_drain_ticks + presentation_ticks.swap) *
++            1000.0 / static_cast<double>(frequency);
+         governor_sample.budget_ms = 1000.0 / 60.0;
+         governor_sample.underruns_delta =
+             current_underruns >= governor_last_underruns
+@@ -4146,6 +4238,33 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             }
+         }
+ 
++        {
++            const uint64_t record_now = SDL_GetPerformanceCounter();
++            const Tier3Stats t3 = tier3_stats();
++            const uint64_t t3_total = t3.instructions[0] + t3.instructions[1];
++            auto us = [&](uint64_t ticks) {
++                return static_cast<uint32_t>(std::min<uint64_t>(
++                    ticks * 1000000ull / frequency, 0xFFFFFFFFull));
++            };
++            FrameTimeRecord& rec =
++                frame_ring[frame_ring_count % kRecordRing];
++            rec.frame = static_cast<uint32_t>(shown_frames);
++            rec.total_us = us(record_now - record_prev_tick);
++            rec.emu_us = us(frame_emu_ticks);
++            rec.push_us = us(frame_push_ticks);
++            rec.present_us = us(presentation_ticks.upload +
++                                presentation_ticks.draw +
++                                presentation_ticks.swap);
++            rec.swap_us = us(presentation_ticks.swap);
++            rec.throttle_us = us(frame_throttle_ticks);
++            rec.queued = queued;
++            rec.tier3_insns = static_cast<uint32_t>(std::min<uint64_t>(
++                t3_total - record_prev_tier3, 0xFFFFFFFFull));
++            rec.underruns = static_cast<uint32_t>(current_underruns);
++            record_prev_tick = record_now;
++            record_prev_tier3 = t3_total;
++            ++frame_ring_count;
++        }
+         ++shown_frames;
+         ++fps_frames;
+         g_live_stats.frames = shown_frames;
+@@ -4230,6 +4349,33 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     const double soak_seconds = static_cast<double>(
+         SDL_GetPerformanceCounter() - soak_start) /
+         static_cast<double>(frequency);
++    {
++        const char* env_path = std::getenv("NDS_FRAME_LOG");
++        const std::string log_path =
++            (env_path && env_path[0]) ? env_path : "frame_times.csv";
++        if (log_path != "off" && frame_ring_count) {
++            if (std::FILE* f = std::fopen(log_path.c_str(), "w")) {
++                std::fprintf(f, "frame,total_us,emu_us,push_us,present_us,"
++                                "swap_us,throttle_us,queued,tier3_insns,"
++                                "underruns\n");
++                const uint64_t n = std::min<uint64_t>(frame_ring_count,
++                                                      kRecordRing);
++                const uint64_t first = frame_ring_count - n;
++                for (uint64_t i = 0; i < n; ++i) {
++                    const FrameTimeRecord& r =
++                        frame_ring[(first + i) % kRecordRing];
++                    std::fprintf(f, "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
++                                 r.frame, r.total_us, r.emu_us, r.push_us,
++                                 r.present_us, r.swap_us, r.throttle_us,
++                                 r.queued, r.tier3_insns, r.underruns);
++                }
++                std::fclose(f);
++                std::fprintf(stderr, "[sdl] frame log: %s (%llu frames)\n",
++                             log_path.c_str(),
++                             static_cast<unsigned long long>(n));
++            }
++        }
++    }
+     const uint64_t top_hash = framebuffer_rgb_fnv(0);
+     const uint64_t bottom_hash = framebuffer_rgb_fnv(1);
+     if (audio) pause_audio(audio, true);
+-- 
+2.54.0 (Apple Git-157)
+

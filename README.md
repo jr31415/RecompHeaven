@@ -1,4 +1,4 @@
-# rhythmheavenrecomp
+# RecompHeaven
 
 Title repo for a static recompilation of Rhythm Heaven (US, `YLZE`) on the
 [ndsrecomp](../GitHub/ndsrecomp) framework. Contains no ROM, BIOS, firmware,
@@ -35,3 +35,24 @@ Differential used as the correctness gate here: run the same script on the
 all-interpreted runner and the banked runner; frame hashes and `insn9/insn7`
 at the same VBlank counts must match, and `static_coverage` Tier-3 counters
 should fall to ~0.
+
+## Framework patches
+
+`framework-patches/` holds the commits made to the ndsrecomp framework for this
+port, as `git format-patch` output against upstream
+`3a57236` (RetroPortingToolKit/ndsrecomp, "Merge pull request #26"):
+
+```
+git clone https://github.com/RetroPortingToolKit/ndsrecomp && cd ndsrecomp
+git checkout 3a57236 && git am /path/to/framework-patches/*.patch
+```
+
+They add the port plan and readiness suite, a dump-free runner build option,
+a `live_overlay_platform.cpp` fix for Apple targets, `--screen-rotation`, the
+audio/vsync reordering with a per-frame timing ring, and the opt-in threaded
+presenter (`NDS_THREADED_PRESENT=1`).
+
+## Legal
+
+No ROM, BIOS, firmware, or generated recompiled code is committed here, and none
+should be (see `.gitignore`). Build from your own dump.

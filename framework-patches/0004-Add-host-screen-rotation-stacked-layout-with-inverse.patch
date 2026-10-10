@@ -1,0 +1,405 @@
+From 6264323eb396c6bf092f138daac7d34802dc4445 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Fri, 9 Oct 2026 21:48:37 -0700
+Subject: [PATCH 4/6] Add host screen rotation (stacked layout) with inverse
+ stylus mapping
+
+--screen-rotation / NDS_SCREEN_ROTATION / [display] screen_rotation accept
+0, 90, 180, 270 (degrees clockwise). Rotates the composed native 256x192
+screens in the stacked layout and maps mouse input back through the
+inverse so touch routing is unchanged. Book-style titles want 270.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runner/src/frontend.cpp        | 164 +++++++++++++++++++++++++++++++--
+ runner/src/frontend.h          |   6 ++
+ runner/src/frontend_config.cpp |  31 +++++++
+ runner/src/main.cpp            |  20 ++++
+ 4 files changed, 211 insertions(+), 10 deletions(-)
+
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index 43e6488..90683ba 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -1326,6 +1326,9 @@ struct FrontendPresentation {
+     uint32_t window_ids[2]{};
+     int screen_widths[2]{kScreenWidth, kScreenWidth};
+     int canvas_width = kScreenWidth;
++    // Degrees clockwise (0/90/180/270). Non-zero only for the stacked layout
++    // at native 256-wide screens; see rotated_footprint().
++    int rotation = 0;
+     int configured_sample_scale = 1;
+     int sample_scale = 1;
+ };
+@@ -1505,6 +1508,101 @@ int window_refresh_hz(SDL_Window* window) {
+ #endif
+ }
+ 
++// Rotated stacked layout. The logical canvas is 384x256 for 90/270 (two
++// 192x256 footprints side by side) or 256x384 for 180. At 270 (CCW quarter
++// turn, the book-style grip) the top screen is on the left; at 90 it is on the
++// right; at 180 it is below the bottom screen.
++bool rotation_is_quarter(int rotation) {
++    return rotation == 90 || rotation == 270;
++}
++
++void rotated_canvas_size(int rotation, int canvas_width, int* w, int* h) {
++    if (rotation_is_quarter(rotation)) {
++        *w = kScreenHeight * 2;
++        *h = kScreenWidth;
++    } else {
++        *w = canvas_width;
++        *h = kScreenHeight * 2;
++    }
++}
++
++SDL_Rect rotated_footprint(int rotation, int screen) {
++    if (rotation == 270)
++        return SDL_Rect{screen == 0 ? 0 : kScreenHeight, 0, kScreenHeight,
++                        kScreenWidth};
++    if (rotation == 90)
++        return SDL_Rect{screen == 0 ? kScreenHeight : 0, 0, kScreenHeight,
++                        kScreenWidth};
++    return SDL_Rect{0, screen == 0 ? kScreenHeight : 0, kScreenWidth,
++                    kScreenHeight};
++}
++
++// The unrotated 256x192 rectangle whose rotation about its centre lands on the
++// footprint.
++SDL_Rect rotated_draw_rect(int rotation, int screen) {
++    const SDL_Rect foot = rotated_footprint(rotation, screen);
++    const int cx = foot.x + foot.w / 2;
++    const int cy = foot.y + foot.h / 2;
++    return SDL_Rect{cx - kScreenWidth / 2, cy - kScreenHeight / 2,
++                    kScreenWidth, kScreenHeight};
++}
++
++// Inverse mapping: a point in the rotated logical canvas -> the equivalent
++// point in the unrotated stacked canvas, so all touch routing downstream is
++// unchanged. Points outside both footprints map far outside the canvas.
++void unrotate_point(int rotation, int canvas_width, float lx, float ly,
++                    float* ox, float* oy) {
++    *ox = -10000.0f;
++    *oy = -10000.0f;
++    for (int screen = 0; screen < 2; ++screen) {
++        const SDL_Rect foot = rotated_footprint(rotation, screen);
++        const float px = lx - static_cast<float>(foot.x);
++        const float py = ly - static_cast<float>(foot.y);
++        if (px < 0 || py < 0 || px >= static_cast<float>(foot.w) ||
++            py >= static_cast<float>(foot.h))
++            continue;
++        // Mouse positions are continuous, so the inverse uses the screen
++        // size, not size-1 (that form is for integer pixel indices).
++        float sx = 0, sy = 0;
++        if (rotation == 270) {
++            sx = static_cast<float>(kScreenWidth) - py;
++            sy = px;
++        } else if (rotation == 90) {
++            sx = py;
++            sy = static_cast<float>(kScreenHeight) - px;
++        } else {
++            sx = static_cast<float>(kScreenWidth) - px;
++            sy = static_cast<float>(kScreenHeight) - py;
++        }
++        sx = std::min(sx, static_cast<float>(kScreenWidth) - 0.001f);
++        sy = std::min(sy, static_cast<float>(kScreenHeight) - 0.001f);
++        *ox = sx + static_cast<float>((canvas_width - kScreenWidth) / 2);
++        *oy = sy + (screen == 1 ? static_cast<float>(kScreenHeight) : 0.0f);
++        return;
++    }
++}
++
++void unrotate_mouse_event(SDL_Event& event,
++                          const FrontendPresentation& presentation) {
++    if (presentation.rotation == 0) return;
++    float x = 0, y = 0, ox = 0, oy = 0;
++    if (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) {
++        x = static_cast<float>(event.button.x);
++        y = static_cast<float>(event.button.y);
++        unrotate_point(presentation.rotation, presentation.canvas_width,
++                       x, y, &ox, &oy);
++        event.button.x = static_cast<decltype(event.button.x)>(ox);
++        event.button.y = static_cast<decltype(event.button.y)>(oy);
++    } else if (event.type == SDL_MOUSEMOTION) {
++        x = static_cast<float>(event.motion.x);
++        y = static_cast<float>(event.motion.y);
++        unrotate_point(presentation.rotation, presentation.canvas_width,
++                       x, y, &ox, &oy);
++        event.motion.x = static_cast<decltype(event.motion.x)>(ox);
++        event.motion.y = static_cast<decltype(event.motion.y)>(oy);
++    }
++}
++
+ void convert_mouse_event_to_logical_coordinates(
+     SDL_Event& event, const FrontendPresentation& presentation) {
+ #if defined(NDS_HAVE_SDL3)
+@@ -1571,6 +1669,21 @@ void render_texture(SDL_Renderer* renderer, SDL_Texture* texture,
+ #endif
+ }
+ 
++void render_texture_rotated(SDL_Renderer* renderer, SDL_Texture* texture,
++                            const SDL_Rect& destination, double angle) {
++#if defined(NDS_HAVE_SDL3)
++    const SDL_FRect dst{static_cast<float>(destination.x),
++                        static_cast<float>(destination.y),
++                        static_cast<float>(destination.w),
++                        static_cast<float>(destination.h)};
++    SDL_RenderTextureRotated(renderer, texture, nullptr, &dst, angle, nullptr,
++                             SDL_FLIP_NONE);
++#else
++    SDL_RenderCopyEx(renderer, texture, nullptr, &destination, angle, nullptr,
++                     SDL_FLIP_NONE);
++#endif
++}
++
+ void render_line(SDL_Renderer* renderer, int x1, int y1, int x2, int y2) {
+ #if defined(NDS_HAVE_SDL3)
+     SDL_RenderLine(renderer, static_cast<float>(x1), static_cast<float>(y1),
+@@ -1717,9 +1830,26 @@ bool create_presentation(const NdsFrontendOptions& options,
+     presentation.canvas_width = std::max(
+         presentation.screen_widths[0],
+         presentation.screen_widths[1]);
++    presentation.rotation = options.screen_rotation;
++    if (presentation.rotation != 0 &&
++        (presentation.separate ||
++         presentation.screen_widths[0] != kScreenWidth ||
++         presentation.screen_widths[1] != kScreenWidth)) {
++        std::fprintf(stderr,
++                     "[sdl] screen rotation needs the stacked layout at "
++                     "native width; ignoring rotation=%d\n",
++                     presentation.rotation);
++        presentation.rotation = 0;
++    }
++    int stacked_w = presentation.canvas_width;
++    int stacked_h = kScreenHeight * 2;
++    if (presentation.rotation != 0) {
++        rotated_canvas_size(presentation.rotation, presentation.canvas_width,
++                            &stacked_w, &stacked_h);
++    }
+     const int first_height = presentation.separate
+         ? kScreenHeight * kWindowScale
+-        : kScreenHeight * 2 * kWindowScale;
++        : stacked_h * kWindowScale;
+     const uint64_t top_window_flags =
+         SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+         (presentation.gl_top
+@@ -1729,7 +1859,7 @@ bool create_presentation(const NdsFrontendOptions& options,
+                                : "ndsrecomp firmware preview",
+         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+         (presentation.separate ? presentation.screen_widths[0]
+-                               : presentation.canvas_width) * kWindowScale,
++                               : stacked_w) * kWindowScale,
+         first_height,
+         top_window_flags);
+     if (!presentation.windows[0]) {
+@@ -1794,13 +1924,13 @@ bool create_presentation(const NdsFrontendOptions& options,
+         }
+         const int logical_height =
+             !presentation.separate && screen == 0
+-                ? kScreenHeight * 2 : kScreenHeight;
++                ? stacked_h : kScreenHeight;
+         if (screen == 0 || presentation.separate) {
+             set_render_logical_size(
+                 presentation.renderers[screen],
+                 presentation.separate
+                     ? presentation.screen_widths[screen]
+-                    : presentation.canvas_width,
++                    : stacked_w,
+                 logical_height);
+ #if !defined(NDS_HAVE_SDL3)
+             SDL_RenderSetIntegerScale(presentation.renderers[screen],
+@@ -1854,7 +1984,7 @@ bool create_presentation(const NdsFrontendOptions& options,
+ }
+ 
+ void render_screen(FrontendPresentation& presentation, int screen,
+-                   const SDL_Rect& destination) {
++                   const SDL_Rect& destination, double angle = 0.0) {
+     SDL_Renderer* renderer = presentation.renderers[screen];
+     SDL_Texture* source = presentation.textures[screen];
+     if (presentation.sample_scale > 1 && presentation.sample_targets[screen]) {
+@@ -1865,7 +1995,10 @@ void render_screen(FrontendPresentation& presentation, int screen,
+         SDL_SetRenderTarget(renderer, nullptr);
+         source = presentation.sample_targets[screen];
+     }
+-    render_texture(renderer, source, &destination);
++    if (angle != 0.0)
++        render_texture_rotated(renderer, source, destination, angle);
++    else
++        render_texture(renderer, source, &destination);
+ }
+ 
+ struct PresentationTicks {
+@@ -1976,16 +2109,26 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
+         start = SDL_GetPerformanceCounter();
+         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
+         SDL_RenderClear(renderer);
+-        const SDL_Rect top_rect{
++        SDL_Rect top_rect{
+             (presentation.canvas_width -
+              presentation.screen_widths[0]) / 2,
+             0, presentation.screen_widths[0], kScreenHeight};
+-        const SDL_Rect bottom_rect{
++        SDL_Rect bottom_rect{
+             (presentation.canvas_width -
+              presentation.screen_widths[1]) / 2,
+             kScreenHeight, presentation.screen_widths[1], kScreenHeight};
+-        render_screen(presentation, 0, top_rect);
+-        render_screen(presentation, 1, bottom_rect);
++        if (presentation.rotation != 0) {
++            const double angle = static_cast<double>(presentation.rotation);
++            render_screen(presentation, 0,
++                          rotated_draw_rect(presentation.rotation, 0), angle);
++            render_screen(presentation, 1,
++                          rotated_draw_rect(presentation.rotation, 1), angle);
++            bottom_rect = rotated_footprint(presentation.rotation, 1);
++            virtual_stylus_visible = false;  // overlay is unrotated
++        } else {
++            render_screen(presentation, 0, top_rect);
++            render_screen(presentation, 1, bottom_rect);
++        }
+         if (virtual_stylus_visible)
+             draw_virtual_stylus(renderer, bottom_rect,
+                                 virtual_stylus_x, virtual_stylus_y);
+@@ -3017,6 +3160,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         SDL_Event event{};
+         while (SDL_PollEvent(&event)) {
+             convert_mouse_event_to_logical_coordinates(event, presentation);
++            unrotate_mouse_event(event, presentation);
+             if (event.type == SDL_QUIT) {
+                 release_relative_mouse();
+                 running = false;
+diff --git a/runner/src/frontend.h b/runner/src/frontend.h
+index 5852a1b..d807152 100644
+--- a/runner/src/frontend.h
++++ b/runner/src/frontend.h
+@@ -193,6 +193,11 @@ struct NdsFrontendOptions {
+     // title-owned setting in this config is rejected for any other ROM.
+     std::string expected_rom_sha1;
+     NdsScreenLayout screen_layout = NdsScreenLayout::Stacked;
++    // Host presentation rotation, degrees clockwise: 0, 90, 180 or 270.
++    // Rotates the composed 256x192 screens only (stacked layout, native
++    // widths); stylus input is mapped back through the inverse. Games that
++    // are played book-style (Rhythm Heaven) want 270.
++    int screen_rotation = 0;
+     NdsFullscreenMode fullscreen = NdsFullscreenMode::Off;
+     NdsStartupMode startup_mode = NdsStartupMode::Preserve;
+     NdsBootMode boot_mode = NdsBootMode::Lle;
+@@ -321,6 +326,7 @@ struct NdsFrontendOptions {
+ bool nds_load_frontend_config(const std::string& path,
+                               NdsFrontendOptions* options,
+                               std::string* error);
++bool nds_parse_screen_rotation(const std::string& value, int* out);
+ bool nds_parse_screen_layout(const std::string& value,
+                              NdsScreenLayout* out);
+ bool nds_parse_fullscreen_mode(const std::string& value,
+diff --git a/runner/src/frontend_config.cpp b/runner/src/frontend_config.cpp
+index 39d81a4..61d7278 100644
+--- a/runner/src/frontend_config.cpp
++++ b/runner/src/frontend_config.cpp
+@@ -26,6 +26,19 @@ static bool nds_set_virtual_stylus_binding(std::string* target,
+     return true;
+ }
+ 
++bool nds_parse_screen_rotation(const std::string& value, int* out) {
++    if (!out) return false;
++    std::string v = lower_ascii(value);
++    if (v == "0" || v == "none" || v == "off") { *out = 0; return true; }
++    if (v == "90" || v == "cw" || v == "right") { *out = 90; return true; }
++    if (v == "180") { *out = 180; return true; }
++    if (v == "270" || v == "-90" || v == "ccw" || v == "left") {
++        *out = 270;
++        return true;
++    }
++    return false;
++}
++
+ bool nds_parse_screen_layout(const std::string& value,
+                              NdsScreenLayout* out) {
+     if (!out) return false;
+@@ -557,6 +570,24 @@ bool nds_load_frontend_config(const std::string& path,
+                 return false;
+             }
+         }
++        if (const auto value =
++                (*display)["screen_rotation"].value<std::string>()) {
++            if (!nds_parse_screen_rotation(*value, &options->screen_rotation)) {
++                if (error) {
++                    *error = "display.screen_rotation must be 0, 90, 180 or 270";
++                }
++                return false;
++            }
++        } else if (const auto number =
++                       (*display)["screen_rotation"].value<int64_t>()) {
++            if (!nds_parse_screen_rotation(std::to_string(*number),
++                                           &options->screen_rotation)) {
++                if (error) {
++                    *error = "display.screen_rotation must be 0, 90, 180 or 270";
++                }
++                return false;
++            }
++        }
+         if (const auto value =
+                 (*display)["adaptive_widescreen"].value<std::string>()) {
+             if (!nds_parse_adaptive_screens(*value,
+diff --git a/runner/src/main.cpp b/runner/src/main.cpp
+index cc261e0..3628f0e 100644
+--- a/runner/src/main.cpp
++++ b/runner/src/main.cpp
+@@ -393,6 +393,7 @@ int main(int argc, char** argv) {
+     std::string rom_path;
+     std::string config_path = "game.toml";
+     std::string cli_screen_layout;
++    std::string cli_screen_rotation;
+     std::string cli_fullscreen;
+     std::string cli_adaptive_screens;
+     std::string cli_widescreen_width;
+@@ -528,6 +529,8 @@ int main(int argc, char** argv) {
+             config_explicit = true;
+         } else if (a == "--screen-layout" && i + 1 < argc) {
+             cli_screen_layout = argv[++i];
++        } else if (a == "--screen-rotation" && i + 1 < argc) {
++            cli_screen_rotation = argv[++i];
+         } else if (a == "--fullscreen" && i + 1 < argc) {
+             cli_fullscreen = argv[++i];
+         } else if (a == "--adaptive-widescreen" && i + 1 < argc) {
+@@ -683,6 +686,7 @@ int main(int argc, char** argv) {
+                 "[--firmware-state-path mutable-firmware.bin] "
+                 "[--config game.toml] "
+                 "[--screen-layout stacked|separate] "
++                "[--screen-rotation 0|90|180|270] "
+                 "[--fullscreen off|borderless|exclusive] "
+                 "[--adaptive-widescreen none|top|bottom|both] "
+                 "[--widescreen-width even:256..448] "
+@@ -779,6 +783,15 @@ int main(int argc, char** argv) {
+         }
+         return 2;
+     }
++    if (const char* value = std::getenv("NDS_SCREEN_ROTATION")) {
++        if (!nds_parse_screen_rotation(value,
++                                       &frontend_options.screen_rotation)) {
++            std::fprintf(stderr,
++                         "invalid NDS_SCREEN_ROTATION "
++                         "(expected 0, 90, 180 or 270)\n");
++            return 2;
++        }
++    }
+     if (const char* value = std::getenv("NDS_SCREEN_LAYOUT")) {
+         if (!nds_parse_screen_layout(value,
+                                      &frontend_options.screen_layout)) {
+@@ -919,6 +932,13 @@ int main(int argc, char** argv) {
+             return 2;
+         }
+     }
++    if (!cli_screen_rotation.empty() &&
++        !nds_parse_screen_rotation(cli_screen_rotation,
++                                   &frontend_options.screen_rotation)) {
++        std::fprintf(stderr,
++                     "invalid --screen-rotation (expected 0, 90, 180 or 270)\n");
++        return 2;
++    }
+     if (!cli_screen_layout.empty() &&
+         !nds_parse_screen_layout(cli_screen_layout,
+                                  &frontend_options.screen_layout)) {
+-- 
+2.54.0 (Apple Git-157)
+

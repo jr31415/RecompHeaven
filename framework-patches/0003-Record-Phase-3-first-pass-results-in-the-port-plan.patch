@@ -1,0 +1,74 @@
+From 14c222e82192cfa42a5ccb0405050b729c091dff Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Fri, 9 Oct 2026 21:31:53 -0700
+Subject: [PATCH 3/6] Record Phase 3 first-pass results in the port plan
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ docs/rhythm-heaven-plan.md | 50 +++++++++++++++++++++++++-------------
+ 1 file changed, 33 insertions(+), 17 deletions(-)
+
+diff --git a/docs/rhythm-heaven-plan.md b/docs/rhythm-heaven-plan.md
+index d902513..6524eef 100644
+--- a/docs/rhythm-heaven-plan.md
++++ b/docs/rhythm-heaven-plan.md
+@@ -91,23 +91,39 @@ windowed/interactive build, touch via mouse, `ndsref` build and G1.
+ Exit: boots to the Rhythm Heaven title screen on both CPUs with no
+ unexplained unmapped I/O; save type recorded.
+ 
+-## Phase 3 — static coverage (the core of "recompile")
+-
+-1. ARM9 main image: recompile from the ROM file at `0x02000000`; ARM7 at
+-   `0x02380000`. Use exact entry points from the header plus function
+-   discovery; fix any finder gap in the analyzer, not with config hints.
+-2. Overlays: generate a bank per overlay (165) straight from the ROM's
+-   overlay table, keyed by content with live-byte validation, because 105 + 59
+-   + 1 bodies share three RAM addresses. If the framework lacks a
+-   per-overlay-id/content-keyed emission mode (`--validate-live-bytes` is the
+-   nearest existing flag), add it to the recompiler. Write a tool in the
+-   title repo that reads the overlay table and emits the configs.
+-3. Reconcile with a runtime capture: every PC the interpreter executed in
+-   Phase 2 must be covered by a bank or be explained.
+-4. Promote until Tier 3 is idle across a complete play session.
+-
+-Exit: `dispatch_misses.log` empty; `tier3_insns9`/`tier3_insns7` ≈ 0 over
+-boot → title → menu → one minigame; `clean_ram_rejects = 0`.
++## Phase 3 — static coverage (FIRST PASS DONE 2026-10-09)
++
++Tooling lives in the title repo (`prepare_images.py`, `capture_session.py`,
++`gen_banks.py`) on top of the framework's `ingest_coverage_manifests.py`.
++
++What was measured (macOS arm64, FreeBIOS direct boot, headless):
++
++- One short session (title, left-handed prompt, ~1,500 VBlanks) produced a
++  manifest with 101 captured code pages. 92 resolved to ROM content with no
++  dumped bytes: the ARM7 module runs from **two relocated aliases**
++  (`0x037F7E18`, `0x027D0968`), the ARM9 image from `0x02000000`, and overlays
++  000 and 045 from slots `0x0227CB20` / `0x02287660`. 9 pages are
++  runtime-materialised (ITCM page, ARM7 pages at `0x027F7000`/`0x03807000`,
++  overlay-band pages) and became captured-page banks.
++- 15 content-validated banks (coverage-driven) and 178 (with
++  `--all-overlays`: every ROM overlay emitted at its table address).
++- **Differential vs the all-interpreted run, same script:** frame hashes of
++  both screens identical at 300/600/700/900/1500 VBlanks; `insn9`/`insn7`
++  identical (261,799,174 / 37,389,093 at 1,500). Tier-3 instructions:
++  ARM9 261.7M -> **0**, ARM7 36.0M -> **8** (2 entries, unidentified).
++- No `dispatch_misses.log` produced.
++
++Caveats: this is in-sample (the banks were seeded from the same flow); a
++minigame path will exercise overlays whose seeds are entry-only until they are
++captured. Reaching minigames needs input that advances past the title (taps on
++the "Touch me!" character did not advance it; the left-handed prompt does
++respond to touch, so the touch path itself works). The `--all-overlays` runner
++binary is ~100 MB; split/trim before packaging.
++
++Next in this phase: advance past the title (find the right input), capture
++per-minigame manifests, rerun ingest (monotonic), regenerate, and repeat the
++differential. Close the 2 ARM7 entries. Re-seed with `--owned-rows-*` so seeds
++are the honest remainder.
+ 
+ ## Phase 4 — accuracy vs the oracle
+ 
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,412 @@
+From 7f9ed29d80983c9e3ae3e0656665a055a99b18b8 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Fri, 9 Oct 2026 21:20:58 -0700
+Subject: [PATCH 2/6] Build the runner on macOS without retail dumps; extend
+ suite with runner stage
+
+- NDS_RETAIL_BIOS_BANKS option (default ON) for dump-free FreeBIOS builds
+- guard live_overlay_platform.cpp for non-Windows/non-Linux targets
+- suite: --runner builds the dump-free runner, boots the ROM headless,
+  probes both framebuffers at 600 VBlanks
+- docs: Phase 1 result and corrections
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ CLAUDE.md                            |  17 +++-
+ docs/rhythm-heaven-plan.md           |  58 ++++++++---
+ runner/CMakeLists.txt                |  41 ++++++--
+ runner/src/live_overlay_platform.cpp |   7 ++
+ tools/rh_suite.py                    | 139 +++++++++++++++++++++------
+ 5 files changed, 205 insertions(+), 57 deletions(-)
+
+diff --git a/CLAUDE.md b/CLAUDE.md
+index d37116c..94a4fe0 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -161,8 +161,8 @@ overlay manifests and `[display]/[cartridge]` settings go in the title repo.
+   (`cmake -G Ninja -B <build> recompiler`) and its decode/cycle/HLE
+   tests pass, including the three that take `<nds_recompile> <work-dir>`
+   args (run by `tools/rh_suite.py`).
+-- **Runner** has not been built on macOS. Known Windows/mingw
+-  assumptions: `host_unwind_x64.cpp` + `host_profile.cpp` (PE
++- **Runner** now builds on macOS arm64 (headless, FreeBIOS path; see
++  plan Phase 1). Remaining Windows/mingw assumptions: `host_unwind_x64.cpp` + `host_profile.cpp` (PE
+   `.pdata` unwinding), `live_overlay*.cpp` (bundled TCC, shared
+   library suffix, process spawn), `wifi_net.cpp` sockets, a hardcoded
+   `F:/Projects/recomp-ui` default in `runner/CMakeLists.txt`, PGO tied
+@@ -220,3 +220,16 @@ overlay manifests and `[display]/[cartridge]` settings go in the title repo.
+   zero codegen gaps; coverage (indirect targets) is still Phase 3 work.
+ - Rerun the suite after any recompiler or portability change:
+   `python tools/rh_suite.py --rom <rom> --work <dir outside iCloud>`.
++
++## Runner status (2026-10-09)
++
++- Builds on macOS arm64 with `-DNDS_RETAIL_BIOS_BANKS=OFF` and a
++  `recomp-ui` checkout (`github.com/mstan/recomp-ui`, set
++  `RECOMP_UI_ROOT`). Boots Rhythm Heaven to the title screen on
++  FreeBIOS + generated firmware + `--boot direct`, **entirely in Tier 3**
++  (no title banks yet). Not oracle-verified.
++- FreeBIOS has no firmware menu; G1/menu work needs the retail dumps.
++- `tools/rh_suite.py --runner --recomp-ui <dir>` reproduces this
++  (34 pass on macOS). Build outputs live in `~/dev/rh-build/`.
++- The title repo's `tools/grab_frames.py` saves both screens over the
++  documented TCP protocol; do not commit the images.
+diff --git a/docs/rhythm-heaven-plan.md b/docs/rhythm-heaven-plan.md
+index 94c8574..d902513 100644
+--- a/docs/rhythm-heaven-plan.md
++++ b/docs/rhythm-heaven-plan.md
+@@ -28,26 +28,56 @@ Standing rules: PRINCIPLES.md / DEBUG.md. Validation is limited by
+ Exit: clean `git status`; recompiler tests (including the three that take
+ `<nds_recompile> <work-dir>` args) pass from the new build dir.
+ 
+-## Phase 1 — runner builds and boots on macOS arm64
++## Phase 1 — runner builds and boots on macOS arm64 (DONE 2026-10-09, FreeBIOS)
+ 
+-Goal: the existing, proven firmware path runs on this Mac. No Rhythm Heaven yet.
++Result: `nds_runner` builds on macOS arm64 (Apple clang 21, Ninja) and boots
++Rhythm Heaven to its title screen ("Touch me!" on the bottom screen) on the
++dump-free FreeBIOS path, headless, in ~2.5 s for 200M ARM9 cycles. Both
++framebuffers are non-empty at 600 VBlanks and the pixel counts reproduce
++exactly across runs. The suite's `--runner` stage encodes this.
+ 
+-1. Make the runner configure on macOS: drop mingw-only link flags, remove the
+-   `F:/Projects/recomp-ui` default, make `host_unwind_x64`/`host_profile`
+-   compile out (or use a Mach-O unwinder) off Windows, build with
+-   `-DNDS_SDL_BACKEND=SDL3`, `NDS_3D_RENDERER=soft`.
+-2. Gate Tier-2 / live-overlay (`live_overlay*.cpp`) behind a CMake option,
+-   default OFF on Apple targets. This is also the iOS prerequisite.
+-3. Produce banks for the BIOSes (retail per D1, else FreeBIOS) and boot to the
+-   firmware menu with mouse touch.
+-4. Build the oracle (`oracle/setup-melonds.sh` → `ndsref`) on macOS and run G1.
+-   Use `melonDS.app` (1.1) only for eyeballing, never as the diff reference.
++Framework changes that made it build:
+ 
+-Exit: G1 passes on macOS with `tier3_insns9 = tier3_insns7 = 0`; menu is
+-interactive with the mouse.
++- `NDS_RETAIL_BIOS_BANKS=OFF` links without `arm9_bios.c`/`arm7_bios.c`
++  (empty retail dispatch tables; the retail path fails at hash verification).
++- `live_overlay_platform.cpp`: the non-Windows/non-Linux branch referenced
++  undeclared locals; guarded so Apple builds compile (live overlay stays off).
++- The runner needs a `recomp-ui` checkout (`RECOMP_UI_ROOT` / `-DNDS_RECOMP_UI_ROOT`);
++  the default pointed at `F:/Projects/recomp-ui`.
++
++Recipe (see `tools/rh_suite.py --runner` for the automated form):
++
++```
++nds_recompile --config bios/freebios9.toml --bin third_party/freebios/drastic_bios_arm9.bin --out G --bank freebios_arm9
++nds_recompile --config bios/freebios7.toml --bin third_party/freebios/drastic_bios_arm7.bin --out G --bank freebios_arm7
++cmake -G Ninja -S runner -B B -DNDS_SDL_BACKEND=NONE -DNDS_BOOTSTRAP_FIRMWARE=ON \
++  -DNDS_RETAIL_BIOS_BANKS=OFF -DNDS_ENABLE_COMPUTE_RENDERER=OFF \
++  -DNDS_GENERATED_DIR=G -DNDS_RECOMP_UI_ROOT=<recomp-ui>
++nds_runner . 200000000 --freebios --generated-firmware --boot direct --rom <rom> --no-save
++```
++
++Corrections to the earlier plan:
++
++- **FreeBIOS has no firmware menu.** `--freebios` requires `--boot direct` and a
++  ROM. G1 (firmware traversal vs `ndsref`) and "boot the real menu" therefore
++  need the retail dumps; they are not available on this path.
++- The Phase 2 title screen was reached **with no title banks**: everything ran
++  through the Tier-3 dirty-RAM interpreter (the permitted correctness floor).
++  So "boots" is real but it is not yet *recompiled* execution.
++- `--boot direct` skips the real BIOS/firmware card boot. It is the project's
++  documented opt-in no-dump path; it is not the LLE boot the principles require
++  for accuracy claims.
++- The save type still defaults to 8 KiB EEPROM (`[save] cartridge backup: eeprom,
++  8192`); unknown, not verified.
++
++Still to do for this phase (needs retail dumps or an SDL3 install): SDL3
++windowed/interactive build, touch via mouse, `ndsref` build and G1.
+ 
+ ## Phase 2 — cartridge boot of Rhythm Heaven (LLE)
+ 
++> Direct-boot title screen already reached in Phase 1 (via Tier 3). What remains
++> here is the *real* card boot (needs retail BIOS/firmware) and the save type.
++
+ 1. Boot the ROM through the real BIOS/firmware/card path (`startup_mode =
+    automatic`; secure area re-encrypt already exists). Watch
+    `dispatch_misses.log` and the cart ring to the first game frame.
+diff --git a/runner/CMakeLists.txt b/runner/CMakeLists.txt
+index a32d59b..fb9cc71 100644
+--- a/runner/CMakeLists.txt
++++ b/runner/CMakeLists.txt
+@@ -26,6 +26,9 @@ option(NDS_BOOTSTRAP_FIRMWARE
+ option(NDS_ENABLE_COMPUTE_RENDERER
+     "Build the preferred melonDS OpenGL 4.3 compute renderer"
+     ON)
++option(NDS_RETAIL_BIOS_BANKS
++    "Link the recompiled retail BIOS banks (needs generated/arm9_bios.c and arm7_bios.c from your own dumps). OFF builds the dump-free FreeBIOS path only; the retail dispatch tables become empty and the retail path is unavailable."
++    ON)
+ set(NDS_SDL_BACKEND "SDL3" CACHE STRING
+     "Host presentation backend: SDL3, SDL2, or NONE")
+ set_property(CACHE NDS_SDL_BACKEND PROPERTY STRINGS SDL3 SDL2 NONE)
+@@ -209,11 +212,28 @@ if(TITLE_GROUP_COUNT GREATER 0)
+     endforeach()
+     set(TITLE_BANK_SOURCES ${TITLE_BANK_BODIES} ${TITLE_BANK_DISPATCH})
+ endif()
++if(NDS_RETAIL_BIOS_BANKS)
++    set(RETAIL_BIOS_SOURCES
++        ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
++        ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c)
++else()
++    # No dumps: satisfy the runner's retail dispatch symbols with empty
++    # tables. The retail path then fails at hash verification, never by
++    # silently running something else.
++    set(RETAIL_BIOS_SOURCES
++        "${CMAKE_CURRENT_BINARY_DIR}/generated/retail_bios_absent.c")
++    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
++    file(WRITE "${RETAIL_BIOS_SOURCES}"
++"/* generated by runner/CMakeLists.txt: NDS_RETAIL_BIOS_BANKS=OFF */
++#include \"runtime_arm.h\"
++const NdsDispatchEntry g_dispatch_arm9_bios[1] = {{0u, 0u, 0, 0}};
++const unsigned g_dispatch_arm9_bios_len = 0u;
++const NdsDispatchEntry g_dispatch_arm7_bios[1] = {{0u, 0u, 0, 0}};
++const unsigned g_dispatch_arm7_bios_len = 0u;
++")
++endif()
+ add_library(nds_banks STATIC
+-    ${GEN}/arm9_bios.c
+-    ${GEN}/arm9_bios_dispatch.c
+-    ${GEN}/arm7_bios.c
+-    ${GEN}/arm7_bios_dispatch.c
++    ${RETAIL_BIOS_SOURCES}
+     ${GEN}/freebios_arm9.c
+     ${GEN}/freebios_arm9_dispatch.c
+     ${GEN}/freebios_arm7.c
+@@ -230,8 +250,7 @@ target_include_directories(nds_banks PRIVATE
+     ${NDS_SM64DS_BANK_DIR}
+     ${TITLE_GROUP_DIRS})
+ set_source_files_properties(
+-    ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
+-    ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c
++    ${RETAIL_BIOS_SOURCES}
+     ${GEN}/freebios_arm9.c ${GEN}/freebios_arm9_dispatch.c
+     ${GEN}/freebios_arm7.c ${GEN}/freebios_arm7_dispatch.c
+     ${FW_BANK_BODIES}
+@@ -254,10 +273,12 @@ endif()
+ # Every immutable bank is CPU-specific even though both use one runtime ABI.
+ # Tell the C compiler which core owns each source so it can fold the emitted
+ # timing selection without changing generated C or the two-CPU scheduler.
+-set(ARM9_BANK_SOURCES ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
+-    ${GEN}/freebios_arm9.c ${GEN}/freebios_arm9_dispatch.c)
+-set(ARM7_BANK_SOURCES ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c
+-    ${GEN}/freebios_arm7.c ${GEN}/freebios_arm7_dispatch.c)
++set(ARM9_BANK_SOURCES ${GEN}/freebios_arm9.c ${GEN}/freebios_arm9_dispatch.c)
++set(ARM7_BANK_SOURCES ${GEN}/freebios_arm7.c ${GEN}/freebios_arm7_dispatch.c)
++if(NDS_RETAIL_BIOS_BANKS)
++    list(APPEND ARM9_BANK_SOURCES ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c)
++    list(APPEND ARM7_BANK_SOURCES ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c)
++endif()
+ set(SM64DS_ARM9_BANK_SOURCES)
+ set(SM64DS_HLE_PROFILE_SOURCES)
+ foreach(src IN LISTS FW_BANK_BODIES FW_BANK_DISPATCH)
+diff --git a/runner/src/live_overlay_platform.cpp b/runner/src/live_overlay_platform.cpp
+index 45b561e..93097d1 100644
+--- a/runner/src/live_overlay_platform.cpp
++++ b/runner/src/live_overlay_platform.cpp
+@@ -83,8 +83,14 @@ std::string live_overlay_bundled_tcc_command(
+     const auto tcc = toolchain / "tcc" / "tcc";
+     const auto runner = exe_dir / "nds_runner";
+ #else
++    // No bundled-TCC provider on this platform (macOS/iOS): live overlay
++    // compilation is unavailable, so there is no command to offer.
++    (void)exe_dir;
++    (void)ec;
++    (void)toolchain;
+     return {};
+ #endif
++#if defined(_WIN32) || defined(__linux__)
+     const auto script = toolchain / "compile_live_shards.py";
+     const auto include = toolchain / "include";
+     ec.clear();
+@@ -104,4 +110,5 @@ std::string live_overlay_bundled_tcc_command(
+         " --runner-exe " + shell_quote(runner) +
+         " --compiler tcc --tcc " + shell_quote(tcc) +
+         " --include-roots --min-hits 8";
++#endif
+ }
+diff --git a/tools/rh_suite.py b/tools/rh_suite.py
+index 5d9c040..3e920b0 100644
+--- a/tools/rh_suite.py
++++ b/tools/rh_suite.py
+@@ -409,55 +409,127 @@ def stage_rom_recompile(ctx):
+            "Real coverage comes from Phase 3 (runtime captures + per-overlay entry maps).")
+ 
+ 
+-# ── runner (opt-in; expected to fail until the macOS port lands) ────────
++# ── runner (opt-in): dump-free FreeBIOS build + 200M-cycle headless boot ──
++def find_recomp_ui(arg):
++    for c in (arg, os.environ.get("RECOMP_UI_ROOT"),
++              str(REPO.parent / "recomp-ui"), str(Path.home() / "dev" / "recomp-ui")):
++        if c and (Path(c) / "src/common/recomp_runtime_ui.c").is_file():
++            return Path(c)
++    return None
++
++
+ def stage_runner(ctx):
+     g = "runner"
+     if not ctx.runner:
+         record(g, "build", "SKIP", "pass --runner to attempt")
+         return
+-    gen = REPO / "generated"
+-    need = ["arm9_bios.c", "arm7_bios.c"]
+-    free_ok = all((REPO / "third_party/freebios" / n).exists()
+-                  for n in FREEBIOS_SHA1)
+-    have_dumps = all((REPO / "bios" / n).exists() for n in ("biosnds9.rom", "biosnds7.rom"))
+-    if not (free_ok or have_dumps):
+-        record(g, "inputs", "SKIP", "neither retail dumps nor FreeBIOS binaries present")
++    if not getattr(ctx, "nds_recompile", None):
++        record(g, "build", "SKIP", "recompiler not built")
++        return
++    fb9 = REPO / "third_party/freebios/drastic_bios_arm9.bin"
++    fb7 = REPO / "third_party/freebios/drastic_bios_arm7.bin"
++    if not (fb9.is_file() and fb7.is_file()):
++        record(g, "inputs", "SKIP", "FreeBIOS submodule not initialised")
+         return
++    ui = find_recomp_ui(ctx.recomp_ui)
++    if not ui:
++        record(g, "recomp-ui", "FAIL",
++               "runner needs the recomp-ui checkout: git clone "
++               "https://github.com/mstan/recomp-ui and pass --recomp-ui <dir> "
++               "(or set RECOMP_UI_ROOT)")
++        return
++    gen = ctx.work / "generated"
++    gen.mkdir(parents=True, exist_ok=True)
++    for bank, cfg, binf in (("freebios_arm9", "freebios9", fb9),
++                            ("freebios_arm7", "freebios7", fb7)):
++        rc, out, dt = run([ctx.nds_recompile, "--config", REPO / "bios" / (cfg + ".toml"),
++                           "--bin", binf, "--out", gen, "--bank", bank])
++        record(g, f"emit {bank}", "PASS" if rc == 0 else "FAIL", tail(out, 2) if rc else "", dt)
++        if rc:
++            return
+     bdir = ctx.work / "runner-build"
+     cfg = ["cmake", "-S", REPO / "runner", "-B", bdir, "-DCMAKE_BUILD_TYPE=Release",
+            "-DNDS_SDL_BACKEND=NONE", "-DNDS_BOOTSTRAP_FIRMWARE=ON",
+-           f"-DNDS_GENERATED_DIR={ctx.work / 'generated'}"]
++           "-DNDS_RETAIL_BIOS_BANKS=OFF", "-DNDS_ENABLE_COMPUTE_RENDERER=OFF",
++           f"-DNDS_GENERATED_DIR={gen}", f"-DNDS_RECOMP_UI_ROOT={ui}"]
+     if shutil.which("ninja"):
+         cfg[1:1] = ["-G", "Ninja"]
+-    (ctx.work / "generated").mkdir(parents=True, exist_ok=True)
+-    if not ctx.nds_recompile:
+-        record(g, "bios banks", "SKIP", "recompiler not built")
+-        return
+-    jobs = []
+-    if have_dumps:
+-        jobs += [("arm9_bios", "biosnds9"), ("arm7_bios", "biosnds7")]
+-        src = lambda b: REPO / "bios" / (b + ".rom")
+-    for bank, base in jobs:
+-        rc, out, dt = run([ctx.nds_recompile, "--config", REPO / "bios" / (base + ".toml"),
+-                           "--bin", src(base), "--out", ctx.work / "generated", "--bank", bank])
+-        record(g, f"emit {bank}", "PASS" if rc == 0 else "FAIL", tail(out, 2) if rc else "", dt)
+-    if not have_dumps:
+-        record(g, "bios banks", "SKIP",
+-               "FreeBIOS bank generation needs the freebios arm9/arm7 configs wired; "
+-               "see docs/rhythm-heaven-plan.md Phase 1")
+-        return
++    if ctx.cc:
++        cfg.append(f"-DCMAKE_C_COMPILER={ctx.cc}")
++    if ctx.cxx:
++        cfg.append(f"-DCMAKE_CXX_COMPILER={ctx.cxx}")
+     rc, out, dt = run(cfg)
+     record(g, "configure", "PASS" if rc == 0 else "FAIL", tail(out, 5) if rc else "", dt)
+     if rc:
+         return
+-    rc, out, dt = run(["cmake", "--build", bdir, "--parallel", str(os.cpu_count() or 4)],
+-                      timeout=3600)
+-    record(g, "build", "PASS" if rc == 0 else "FAIL", tail(out, 5) if rc else "", dt)
++    rc, out, dt = run(["cmake", "--build", bdir, "--target", "nds_runner",
++                       "--parallel", str(os.cpu_count() or 4)], timeout=3600)
++    record(g, "build", "PASS" if rc == 0 else "FAIL",
++           " | ".join(l for l in out.splitlines() if "error" in l)[:600] if rc else "", dt)
++    if rc:
++        return
++    exe = next((p for p in (bdir / ("nds_runner" + EXE), bdir / "Release" / ("nds_runner" + EXE))
++                if p.exists()), None)
++    if not exe:
++        record(g, "binary", "FAIL", "nds_runner not found after build")
++        return
++    if not getattr(ctx, "rom", None):
++        record(g, "boot smoke", "SKIP", "no ROM")
++        return
++    rwd = ctx.work / "runner-run"
++    shutil.rmtree(rwd, ignore_errors=True)
++    rwd.mkdir(parents=True)
++    rc, out, dt = run([exe, ".", "200000000", "--freebios", "--generated-firmware",
++                       "--boot", "direct", "--rom", str(ctx.rom.resolve()), "--no-save",
++                       "--diagnostics", "off", "--no-coverage-manifest"],
++                      cwd=rwd, timeout=600)
++    ok = rc == 0 and "== result" in out and "reached budget" in out \
++        and "ARM9: PC=" in out and "SHA-1 601b92b1603f1822543e264df55ab4152ded356c" in out
++    record(g, "boot smoke (200M cycles, headless)", "PASS" if ok else "FAIL",
++           f"rc={rc}" if ok else tail(out, 6), dt)
++    # The strongest artifact check we allow ourselves: both screens produced
++    # pixels by 600 VBlanks over the documented TCP protocol.
++    try:
++        import socket
++        port = 19842
++        pr = subprocess.Popen([str(exe), ".", "--serve", "--port", str(port), "--freebios",
++                               "--generated-firmware", "--boot", "direct", "--rom", str(ctx.rom.resolve()),
++                               "--no-save", "--diagnostics", "off", "--no-coverage-manifest"],
++                              cwd=rwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++        try:
++            sk = None
++            for _ in range(100):
++                try:
++                    sk = socket.create_connection(("127.0.0.1", port), timeout=120)
++                    break
++                except OSError:
++                    time.sleep(0.2)
++            if not sk:
++                record(g, "frame probe", "FAIL", "debug port never opened")
++                return
++            f = sk.makefile("rw", newline="\n")
++
++            def call(**r):
++                f.write(json.dumps(r) + "\n")
++                f.flush()
++                return json.loads(f.readline())
++            r = call(cmd="run_to_event", event="vblank9", count=600)
++            fa = bytes.fromhex(call(cmd="framebuffer", engine="A")["rgb"])
++            fb = bytes.fromhex(call(cmd="framebuffer", engine="B")["rgb"])
++            lit = lambda b: sum(1 for x in b if x) > len(b) // 4
++            record(g, "frame probe (600 vblanks)", "PASS" if r.get("reached") and lit(fa) and lit(fb)
++                   else "FAIL", f"reached={r.get('reached')} "
++                   f"A_nonzero={sum(1 for x in fa if x)} B_nonzero={sum(1 for x in fb if x)}")
++        finally:
++            pr.terminate()
++    except Exception as e:
++        record(g, "frame probe", "FAIL", f"{type(e).__name__}: {e}")
+ 
+ 
+ # ── driver ──────────────────────────────────────────────────────────────
+ class Ctx:
+     cc = cxx = None
++    recomp_ui = None
+     nds_recompile = None
+     rom = None
+     rom_data = None
+@@ -487,13 +559,18 @@ def main():
+     ap.add_argument("--work", default=str(REPO / "build-suite"))
+     ap.add_argument("--only", help="comma list of: " + ",".join(n for n, _ in STAGES))
+     ap.add_argument("--cc", help="C compiler override")
+-    ap.add_argument("--runner", action="store_true", help="also attempt the runner build")
++    ap.add_argument("--runner", action="store_true", help="also build the dump-free runner and boot the ROM headless")
++    ap.add_argument("--recomp-ui", help="path to a recomp-ui checkout (needed by --runner)")
+     a = ap.parse_args()
+     ctx = Ctx()
+-    ctx.rom_arg, ctx.cc, ctx.runner = a.rom, a.cc, a.runner
++    ctx.rom_arg, ctx.cc, ctx.runner, ctx.recomp_ui = a.rom, a.cc, a.runner, a.recomp_ui
+     ctx.work = Path(a.work).resolve()
+     ctx.work.mkdir(parents=True, exist_ok=True)
+     only = set(a.only.split(",")) if a.only else None
++    if only and "runner" in only:  # prerequisites
++        only |= {"env", "rom", "recompiler"}
++    if only and "rom-recompile" in only:
++        only |= {"env", "rom", "recompiler"}
+     t0 = time.time()
+     print(f"rh_suite: repo={REPO}\n          work={ctx.work}")
+     for name, fn in STAGES:
+-- 
+2.54.0 (Apple Git-157)
+

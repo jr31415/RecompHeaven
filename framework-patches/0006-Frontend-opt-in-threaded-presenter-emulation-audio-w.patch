@@ -1,0 +1,440 @@
+From be1a81b2ba1f4195c4cd30f737d3c839114e54f2 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Fri, 9 Oct 2026 22:23:46 -0700
+Subject: [PATCH 6/6] Frontend: opt-in threaded presenter (emulation+audio
+ worker, vsync on main)
+
+NDS_THREADED_PRESENT=1 runs the unchanged emulation loop on a worker thread
+and keeps SDL events and the vsync'd present on the main thread. The loop is
+no longer locked to the display rate, so a missed vblank or a long present no
+longer starves the audio queue. Input arrives via a queue; the few
+main-thread-only SDL calls go through run_on_main(). Default stays
+single-threaded.
+
+Measured cause (real session, 4374 frames): emulation p99 8.6 ms, 111 audio
+underruns, mean frame 17.2 ms vs 16.7 ms DS period with present stalls to 138 ms.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runner/src/frontend.cpp | 292 +++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 262 insertions(+), 30 deletions(-)
+
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index 5373258..2ce4c0f 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -9,8 +9,16 @@
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
++#include <chrono>
++#include <condition_variable>
+ #include <cstring>
++#include <deque>
+ #include <filesystem>
++#include <functional>
++#include <future>
++#include <memory>
++#include <mutex>
++#include <thread>
+ #include <fstream>
+ #include <initializer_list>
+ #include <limits>
+@@ -774,7 +782,82 @@ bool sdl_set_thread_priority_high() {
+ #endif
+ }
+ 
++// Threaded presenter (opt-in, NDS_THREADED_PRESENT=1).
++//
++// SDL's renderer and window APIs belong to the main thread. The default
++// frontend therefore emulates, paces audio and presents on that one thread, so
++// a vsync-blocking present stalls the audio clock: the loop is locked to the
++// display rate (60.0 Hz) while the DS makes 59.83 Hz of audio, every missed
++// vblank costs a whole frame of audio, and the queue starves.
++//
++// In this mode the main thread owns SDL (events, the vsync'd present, window
++// calls) and a worker thread runs the unchanged emulation loop. The worker never
++// waits on the display: it publishes the newest composed frame to a mailbox
++// (latest wins, so a late presenter drops a frame instead of blocking audio),
++// takes input from a queue the main thread fills, and routes the few
++// main-thread-only SDL calls through run_on_main().
++struct ThreadedPresenter {
++    std::mutex mutex;
++    std::condition_variable cv;
++    std::deque<SDL_Event> events;                   // main -> worker
++    std::deque<std::function<void()>> tasks;        // worker -> main
++    std::vector<uint32_t> pix[2];                   // worker -> main
++    int width[2]{256, 256};
++    uint64_t seq = 0;
++    bool stylus_visible = false;
++    float stylus_x = 0.0f;
++    float stylus_y = 0.0f;
++    std::string notice;
++    std::atomic<bool> worker_done{false};
++    std::atomic<uint64_t> last_swap_ticks{0};
++    std::atomic<uint64_t> last_present_ticks{0};
++    std::atomic<uint64_t> presented{0};
++};
++bool sdl_set_relative_mouse_mode_impl(SDL_Window* window, bool enabled);
++ThreadedPresenter* g_presenter = nullptr;
++std::thread::id g_main_thread_id;
++
++// Run `fn` on the main (SDL) thread. Inline when threading is off or when
++// already on it. `wait` blocks the caller until it has run.
++void run_on_main(std::function<void()> fn, bool wait) {
++    if (!g_presenter || std::this_thread::get_id() == g_main_thread_id) {
++        fn();
++        return;
++    }
++    if (!wait) {
++        {
++            std::lock_guard<std::mutex> lock(g_presenter->mutex);
++            g_presenter->tasks.push_back(std::move(fn));
++        }
++        g_presenter->cv.notify_one();
++        return;
++    }
++    auto done = std::make_shared<std::promise<void>>();
++    std::future<void> finished = done->get_future();
++    {
++        std::lock_guard<std::mutex> lock(g_presenter->mutex);
++        g_presenter->tasks.push_back([fn = std::move(fn), done]() mutable {
++            fn();
++            done->set_value();
++        });
++    }
++    g_presenter->cv.notify_one();
++    finished.wait();
++}
++
+ bool sdl_set_relative_mouse_mode(SDL_Window* window, bool enabled) {
++    bool ok = false;
++    run_on_main([&]() { ok = sdl_set_relative_mouse_mode_impl(window, enabled); },
++                true);
++    return ok;
++}
++
++void sdl_capture_mouse(bool enabled) {
++    run_on_main([enabled]() { SDL_CaptureMouse(enabled ? SDL_TRUE : SDL_FALSE); },
++                false);
++}
++
++bool sdl_set_relative_mouse_mode_impl(SDL_Window* window, bool enabled) {
+ #if defined(NDS_HAVE_SDL3)
+     return SDL_SetWindowRelativeMouseMode(window, enabled);
+ #else
+@@ -2747,7 +2830,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         if (!virtual_stylus_capture_owned) return;
+         if (!relative_mouse.captured()) {
+             sdl_set_relative_mouse_mode(presentation.windows[0], false);
+-            SDL_CaptureMouse(SDL_FALSE);
++            sdl_capture_mouse(false);
+         }
+         virtual_stylus_capture_owned = false;
+     };
+@@ -2771,7 +2854,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                          SDL_GetError());
+             return;
+         }
+-        SDL_CaptureMouse(SDL_TRUE);
++        sdl_capture_mouse(true);
+         SDL_GetRelativeMouseState(nullptr, nullptr);
+         virtual_stylus_capture_owned = true;
+     };
+@@ -2840,7 +2923,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     auto release_relative_mouse = [&]() {
+         if (relative_mouse.captured()) {
+             sdl_set_relative_mouse_mode(presentation.windows[0], false);
+-            SDL_CaptureMouse(SDL_FALSE);
++            sdl_capture_mouse(false);
+             relative_mouse.release();
+             nds_set_touch(0, 0, false);
+             std::fprintf(stderr, "[sdl] relative mouse released\n");
+@@ -2864,7 +2947,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                          SDL_GetError());
+             return;
+         }
+-        SDL_CaptureMouse(SDL_TRUE);
++        sdl_capture_mouse(true);
+         SDL_GetRelativeMouseState(nullptr, nullptr);
+         relative_mouse.capture(options.relative_mouse_sensitivity,
+                                options.relative_mouse_invert_y);
+@@ -3028,6 +3111,31 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     std::string savestate_notice;
+     uint64_t savestate_notice_until = 0;
+ 
++    bool threaded = false;
++    if (const char* env = std::getenv("NDS_THREADED_PRESENT"))
++        threaded = env[0] == '1';
++    if (threaded && presentation.gl_top) {
++        std::fprintf(stderr,
++                     "[sdl] threaded presenter unsupported with the direct "
++                     "GL top presenter; staying single-threaded\n");
++        threaded = false;
++    }
++    ThreadedPresenter presenter;
++    g_main_thread_id = std::this_thread::get_id();
++    if (threaded) {
++        g_presenter = &presenter;
++        std::fprintf(stderr,
++                     "[sdl] threaded presenter: emulation+audio on a worker, "
++                     "vsync'd present on the main thread\n");
++    }
++    auto apply_governor_stage = [&](uint8_t stage) -> bool {
++        bool ok = false;
++        run_on_main([&]() {
++            ok = apply_performance_governor_stage(options, presentation, stage);
++        }, true);
++        return ok;
++    };
++    auto emulation_loop = [&]() {
+     while (running) {
+ #if defined(NDS_HAVE_COMPUTE_RENDERER)
+         if (!nds_compute_host_make_current()) {
+@@ -3115,7 +3223,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                 relative_mouse_selftest_error |=
+                     !options.relative_mouse_touch ||
+                     options.relative_mouse_fire_mask == 0;
+-                SDL_RaiseWindow(presentation.windows[0]);
++                {
++                    SDL_Window* raise_window = presentation.windows[0];
++                    run_on_main([raise_window]() { SDL_RaiseWindow(raise_window); },
++                                true);
++                }
+                 injected.type = SDL_MOUSEBUTTONDOWN;
+                 injected.button.windowID = presentation.window_ids[0];
+                 injected.button.button = SDL_BUTTON_LEFT;
+@@ -3238,9 +3350,19 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             }
+         }
+         SDL_Event event{};
+-        while (SDL_PollEvent(&event)) {
+-            convert_mouse_event_to_logical_coordinates(event, presentation);
+-            unrotate_mouse_event(event, presentation);
++        auto next_event = [&]() -> bool {
++            if (!threaded) return SDL_PollEvent(&event);
++            std::lock_guard<std::mutex> lock(presenter.mutex);
++            if (presenter.events.empty()) return false;
++            event = presenter.events.front();
++            presenter.events.pop_front();
++            return true;
++        };
++        while (next_event()) {
++            if (!threaded) {
++                convert_mouse_event_to_logical_coordinates(event, presentation);
++                unrotate_mouse_event(event, presentation);
++            }
+             if (event.type == SDL_QUIT) {
+                 release_relative_mouse();
+                 running = false;
+@@ -3343,9 +3465,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                         if (!perf_governor.apply_failed &&
+                             options.perf_governor_mode !=
+                                 NdsPerfGovernorMode::Off &&
+-                            !apply_performance_governor_stage(
+-                                options, presentation,
+-                                perf_governor.stage)) {
++                            !apply_governor_stage(perf_governor.stage)) {
+                             nds_perf_governor_mark_apply_failed(
+                                 &perf_governor);
+                             nds_perf_governor_record_transition(
+@@ -4067,7 +4187,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         // here: this only re-presents pixels that already exist. The direct
+         // presenter is excluded above; direct-present frames are excluded
+         // again per frame because their top surface lives on the GPU.
+-        if (interpolation_active && blend_cache.valid && !turbo_active &&
++        if (!threaded && interpolation_active && blend_cache.valid &&
++            !turbo_active &&
+             !nds_gpu2d_direct_present_frame_active() &&
+             blend_cache.widths[0] == top_width &&
+             blend_cache.widths[1] == bottom_width && audio_started &&
+@@ -4101,15 +4222,51 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             // loop, so input keeps its DS-frame sampling cadence. Pumping
+             // here only keeps the OS message queue from backing up across the
+             // extra present.
+-            SDL_PumpEvents();
++            if (!threaded) SDL_PumpEvents();
++        }
++        PresentationTicks presentation_ticks{};
++        presentation_ticks.ok = true;
++        if (threaded) {
++            // The menu overlay is CPU work that shares state with the input
++            // handling above, so it stays on this thread; the main thread only
++            // uploads, draws and presents (vsync) what is published here.
++            const uint32_t* const tp = runtime_menu_overlay(
++                runtime_ui, top_pixels, top_width, kScreenHeight);
++            const uint32_t* const bp = runtime_menu_overlay(
++                runtime_ui, bottom_pixels, bottom_width, kScreenHeight);
++            {
++                std::lock_guard<std::mutex> lock(presenter.mutex);
++                presenter.pix[0].assign(
++                    tp, tp + static_cast<size_t>(top_width) * kScreenHeight);
++                presenter.pix[1].assign(
++                    bp, bp + static_cast<size_t>(bottom_width) * kScreenHeight);
++                presenter.width[0] = top_width;
++                presenter.width[1] = bottom_width;
++                presenter.stylus_visible =
++                    mph_prime_virtual_stylus || generic_virtual_stylus;
++                presenter.stylus_x = mph_virtual_x;
++                presenter.stylus_y = mph_virtual_y;
++                presenter.notice = savestate_notice;
++                ++presenter.seq;
++            }
++            presenter.cv.notify_one();
++        } else {
++            presentation_ticks = present_screens(
++                presentation, top_pixels, top_width,
++                bottom_pixels, bottom_width,
++                runtime_ui,
++                mph_prime_virtual_stylus || generic_virtual_stylus,
++                mph_virtual_x, mph_virtual_y,
++                savestate_notice.empty() ? nullptr
++                                         : savestate_notice.c_str());
+         }
+-        const PresentationTicks presentation_ticks = present_screens(
+-            presentation, top_pixels, top_width,
+-            bottom_pixels, bottom_width,
+-            runtime_ui,
+-            mph_prime_virtual_stylus || generic_virtual_stylus,
+-            mph_virtual_x, mph_virtual_y,
+-            savestate_notice.empty() ? nullptr : savestate_notice.c_str());
++        const uint64_t log_swap_ticks = threaded
++            ? presenter.last_swap_ticks.load(std::memory_order_relaxed)
++            : presentation_ticks.swap;
++        const uint64_t log_present_ticks = threaded
++            ? presenter.last_present_ticks.load(std::memory_order_relaxed)
++            : presentation_ticks.upload + presentation_ticks.draw +
++                  presentation_ticks.swap;
+         if (!presentation_ticks.ok) {
+             compute_failed = true;
+             running = false;
+@@ -4208,8 +4365,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         if (nds_perf_governor_update(&perf_governor, governor_sample)) {
+             const uint8_t requested_stage = perf_governor.stage;
+             NdsPerfGovernorReason reason = perf_governor.last_reason;
+-            bool applied = apply_performance_governor_stage(
+-                options, presentation, requested_stage);
++            bool applied = apply_governor_stage(requested_stage);
+             if (!applied) {
+                 // Nothing was mutated by the failed apply, so the previously
+                 // installed stage is still the live one. Report that stage and
+@@ -4252,10 +4408,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             rec.total_us = us(record_now - record_prev_tick);
+             rec.emu_us = us(frame_emu_ticks);
+             rec.push_us = us(frame_push_ticks);
+-            rec.present_us = us(presentation_ticks.upload +
+-                                presentation_ticks.draw +
+-                                presentation_ticks.swap);
+-            rec.swap_us = us(presentation_ticks.swap);
++            rec.present_us = us(log_present_ticks);
++            rec.swap_us = us(log_swap_ticks);
+             rec.throttle_us = us(frame_throttle_ticks);
+             rec.queued = queued;
+             rec.tier3_insns = static_cast<uint32_t>(std::min<uint64_t>(
+@@ -4313,14 +4467,20 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                 ? "ndsrecomp - Top Screen - " + fps_text + governor_text
+                 : "ndsrecomp firmware preview - " + fps_text +
+                       governor_text;
+-            SDL_SetWindowTitle(presentation.windows[0],
+-                               top_title.c_str());
++            {
++                SDL_Window* const top_window = presentation.windows[0];
++                run_on_main([top_window, top_title]() {
++                    SDL_SetWindowTitle(top_window, top_title.c_str());
++                }, false);
++            }
+             if (presentation.separate) {
+                 const std::string bottom_title =
+                     "ndsrecomp - Bottom Screen - " + fps_text +
+                     governor_text;
+-                SDL_SetWindowTitle(presentation.windows[1],
+-                                   bottom_title.c_str());
++                SDL_Window* const bottom_window = presentation.windows[1];
++                run_on_main([bottom_window, bottom_title]() {
++                    SDL_SetWindowTitle(bottom_window, bottom_title.c_str());
++                }, false);
+             }
+             fps_frames = 0;
+             fps_start = counter;
+@@ -4339,6 +4499,78 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             SDL_Delay(8);
+         }
+     }
++    };  // emulation_loop
++
++    if (threaded) {
++        std::thread worker([&]() {
++            sdl_set_thread_priority_high();
++            emulation_loop();
++            presenter.worker_done.store(true);
++            presenter.cv.notify_all();
++        });
++        std::vector<uint32_t> local[2];
++        int local_width[2]{kScreenWidth, kScreenWidth};
++        uint64_t seen = 0;
++        bool stylus_visible = false;
++        float stylus_x = 0.0f;
++        float stylus_y = 0.0f;
++        std::string notice;
++        for (;;) {
++            SDL_Event queued_event{};
++            while (SDL_PollEvent(&queued_event)) {
++                convert_mouse_event_to_logical_coordinates(queued_event,
++                                                           presentation);
++                unrotate_mouse_event(queued_event, presentation);
++                std::lock_guard<std::mutex> lock(presenter.mutex);
++                presenter.events.push_back(queued_event);
++            }
++            for (;;) {
++                std::function<void()> task;
++                {
++                    std::lock_guard<std::mutex> lock(presenter.mutex);
++                    if (presenter.tasks.empty()) break;
++                    task = std::move(presenter.tasks.front());
++                    presenter.tasks.pop_front();
++                }
++                task();
++            }
++            if (presenter.worker_done.load()) break;
++            bool have_frame = false;
++            {
++                std::unique_lock<std::mutex> lock(presenter.mutex);
++                if (presenter.seq == seen && presenter.tasks.empty())
++                    presenter.cv.wait_for(lock, std::chrono::milliseconds(2));
++                if (presenter.seq != seen) {
++                    local[0] = presenter.pix[0];
++                    local[1] = presenter.pix[1];
++                    local_width[0] = presenter.width[0];
++                    local_width[1] = presenter.width[1];
++                    stylus_visible = presenter.stylus_visible;
++                    stylus_x = presenter.stylus_x;
++                    stylus_y = presenter.stylus_y;
++                    notice = presenter.notice;
++                    seen = presenter.seq;
++                    have_frame = true;
++                }
++            }
++            if (have_frame && !local[0].empty() && !local[1].empty()) {
++                const PresentationTicks t = present_screens(
++                    presentation, local[0].data(), local_width[0],
++                    local[1].data(), local_width[1], nullptr, stylus_visible,
++                    stylus_x, stylus_y, notice.empty() ? nullptr
++                                                       : notice.c_str());
++                presenter.last_swap_ticks.store(t.swap,
++                                                std::memory_order_relaxed);
++                presenter.last_present_ticks.store(
++                    t.upload + t.draw + t.swap, std::memory_order_relaxed);
++                presenter.presented.fetch_add(1, std::memory_order_relaxed);
++            }
++        }
++        worker.join();
++        g_presenter = nullptr;
++    } else {
++        emulation_loop();
++    }
+ 
+     release_relative_mouse();
+     nds_set_touch(0, 0, false);
+-- 
+2.54.0 (Apple Git-157)
+

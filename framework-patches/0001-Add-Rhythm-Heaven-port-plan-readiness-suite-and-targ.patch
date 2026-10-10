@@ -1,0 +1,922 @@
+From 6fa1b8cf67204a9e11b86d829c9a6c471ca46eb0 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Fri, 9 Oct 2026 21:03:50 -0700
+Subject: [PATCH 1/6] Add Rhythm Heaven port plan, readiness suite, and target
+ notes
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .gitignore                 |  11 +-
+ CLAUDE.md                  | 132 ++++++++++
+ docs/rhythm-heaven-plan.md | 200 ++++++++++++++
+ tools/rh_suite.py          | 526 +++++++++++++++++++++++++++++++++++++
+ 4 files changed, 867 insertions(+), 2 deletions(-)
+ create mode 100644 docs/rhythm-heaven-plan.md
+ create mode 100644 tools/rh_suite.py
+
+diff --git a/.gitignore b/.gitignore
+index cf78bc8..ad6627c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -66,11 +66,18 @@ __pycache__/
+ Thumbs.db
+ 
+ # third_party/ is vendored locally, EXCEPT the explicit freebios submodule.
+-!third_party/freebios
++!third_party/freebios
+ 
+ # Tier-2 toolchain downloads and test scratch
+ /tools/_toolchain_cache/
+ /runner/tests/live-index-lock-work/
+ 
+ # Runtime-generated per-install identity (written by the runner when profile dir = repo root)
+-runner/freebios/
++runner/freebios/
++
++# ── Game media / third-party app bundles — never commit ────────────────────
++*.nds
++*.dsi
++*.srl
++melonDS.app/
++build-suite/
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 4833994..d37116c 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -88,3 +88,135 @@ Always-on ring buffers (per-CPU bus accesses, IPC traffic, dispatch
+ entries), a frame-record ring, and a dispatch-miss log, queried
+ retroactively over the TCP debug server. Never arm-then-capture; never
+ pause/step to synchronize observers. See `DEBUG.md`.
++
++---
++
++# TARGET: Rhythm Heaven (US) → macOS / Windows / iOS
++
++Added 2026-10-09. Everything above still governs. This section records
++what is specific to the Rhythm Heaven effort and what the first survey
++found. Plan: `docs/rhythm-heaven-plan.md`.
++
++## Status of the gate
++
++The FIRMWARE-MENU GATE above was passed by the framework (PLAN.md
++Phases 2–6, gates G1/G2/G3). It is **not** being re-earned for this
++title, but it is the regression floor: every portability change must
++keep G1 (firmware traversal vs fresh `ndsref`) green. Game work is
++allowed; ARM-interpreter-on-hot-path, BIOS-SWI stubs, edits to
++`generated/**`, and load-bearing HLE are still forbidden.
++
++`AGENTS.md` is a standing user policy: no perf/validation matrices, no
++multi-route/multi-repetition benchmark legs. Gameplay validation is
++capped at **one** run per kind unless the user asks for more.
++
++## The ROM
++
++`3588 - Rhythm Heaven (US)(XenoPhobia).nds` (repo root, untracked, 128 MiB
++image, SHA-1 `601b92b1603f1822543e264df55ab4152ded356c`).
++
++| field | value |
++|---|---|
++| title / code | `RHYTHMHEAVEN` / `YLZE`, maker `01`, rev 0, NDS (unit 0, not DSi-enhanced) |
++| ARM9 | ROM `0x4000`, load/entry `0x02000000` / `0x02000800`, `0x53B98` B (~339 KB) |
++| ARM7 | ROM `0x15D400`, load/entry `0x02380000`, `0x26F28` B; no ARM7 overlays |
++| ARM9 overlays | table `0x57C00`, **165 overlays**, all uncompressed, ~1 MB total, max `0xAB20` B |
++| overlay RAM slots | only **3 load addresses**: `0x0228FA60` (105 ovl), `0x02287660` (59), `0x0227CB20` (1) |
++| FNT / FAT | `0x184400` / `0x18C400` |
++| secure area | stored **decrypted**; runner re-encrypts to card form (`runner/src/io.cpp` ~229) |
++| save type | **unknown** — not in the header. Determine (melonDS game DB / observed AUXSPI traffic) and declare in `[cartridge]`; do not rely on the 8 KiB EEPROM default |
++
++Consequences:
++
++- Overlays are plain bytes in the ROM, so they can be recompiled **ahead
++  of time from the ROM file** instead of only from RAM captures. But
++  165 bodies share 3 addresses: banks must be content-validated and
++  keyed by bytes/bank identity, never bare PC (see
++  `docs/overlay-strategy.md`, `HLE_ARCHITECTURE.md` wrapper rule).
++- The code footprint is small next to SM64DS (1.3 GiB of C), so full
++  static coverage with Tier 3 idle is the target, not an aspiration.
++  That is also what makes the iOS port viable.
++- It is a stylus + audio-timing game. Touch, SPU exactness and
++  input→audio/video latency matter more than raw throughput.
++
++## Repository shape
++
++This repo is the **framework**. Per-title work lives in a separate
++title repo (siblings so far: `supermario64dsrecomp`, MarioKartDSRecomp;
++neither is checked out here). Rhythm Heaven needs its own
++(`rhythmheavenrecomp`, at `~/dev/rhythmheavenrecomp`, outside iCloud Drive): config TOMLs, bank-capture tools, generated
++banks (ignored), `game.toml`. It is wired in with
++`-DNDS_TITLE_BANK_DIR=<dir> -DNDS_TITLE_ROM_SHA1=601b92b1…`. Do not put
++title names or addresses into the shared runner.
++
++Framework changes needed by the port (portability, new recompiler
++features, bus/device fixes) go in **this** repo; ROM-specific config,
++overlay manifests and `[display]/[cartridge]` settings go in the title repo.
++
++## Environment facts (surveyed 2026-10-09)
++
++- Machine: Apple M3 (arm64), 16 GB, AppleClang 21, CMake 4.4, Ninja,
++  Xcode present. SDL3 and libslirp not confirmed installed.
++- **Recompiler** builds on macOS arm64 from a clean tree
++  (`cmake -G Ninja -B <build> recompiler`) and its decode/cycle/HLE
++  tests pass, including the three that take `<nds_recompile> <work-dir>`
++  args (run by `tools/rh_suite.py`).
++- **Runner** has not been built on macOS. Known Windows/mingw
++  assumptions: `host_unwind_x64.cpp` + `host_profile.cpp` (PE
++  `.pdata` unwinding), `live_overlay*.cpp` (bundled TCC, shared
++  library suffix, process spawn), `wifi_net.cpp` sockets, a hardcoded
++  `F:/Projects/recomp-ui` default in `runner/CMakeLists.txt`, PGO tied
++  to mingw-gcc, `.ps1`-only helper scripts under `tools/`.
++- **Dumps are missing**: `bios/` has only the `.toml` configs. The
++  faithful path needs `biosnds7.rom`, `biosnds9.rom`, `firmware.bin`
++  (hashes in README). Without them only the opt-in FreeBIOS path
++  (`--freebios --generated-firmware --boot direct`) can run. That path
++  is not the oracle-diffed floor; the retail dumps stay authoritative.
++- **melonDS.app** (v1.1, universal) in the repo root is a GUI emulator
++  for eyeballing and for finding the save type. It is **not** the
++  oracle: the oracle is `ndsref`, melonDS pinned to `1.0rc` plus the
++  TCP patch, built by `oracle/setup-melonds.sh` into `third_party/`
++  (gitignored). It has not been built on macOS yet.
++- The repo sits under iCloud Drive. Keep build trees, `generated/`
++  and title bank output **outside** iCloud (hundreds of MB of C and
++  thousands of object files will thrash sync).
++
++## Port constraints to keep in view
++
++- **No generated banks, ROMs, BIOS or firmware in any distributed
++  artifact.** Banks are derived from Nintendo code, so every platform's
++  deliverable is "build/run with your own ROM (and BIOS)": a local
++  regen+build pipeline, not a prebuilt binary containing the game.
++- **iOS forbids runtime codegen.** Tier 2 / live-overlay (TCC + shared
++  library) cannot exist there, and the Tier-3 interpreter must be
++  idle in normal play. All Rhythm Heaven code reachable in play must
++  be in static banks. Because banks are ROM-derived, an iOS build is a
++  user-built/self-signed app, not an App Store binary.
++- **GPL-3.0-or-later**: `nds_runner` links vendored melonDS code
++  (Wi-Fi, GPU3D). Distribution must ship source and `LICENSE-GPL`;
++  App Store terms are generally incompatible with this.
++- **Renderer**: the compute backend needs OpenGL 4.3. macOS tops out
++  at 4.1 and iOS has no desktop GL, so Apple platforms use the
++  threaded software renderer (`NDS_3D_RENDERER=soft`) unless a Metal
++  backend is written. Software is the accuracy floor anyway.
++- **Known fidelity gaps that a 2D-heavy title may hit** (PLAN.md WS-D):
++  2D windows (Win0/Win1/OBJ window/WINOUT) unimplemented, main-memory
++  display FIFO absent, SPU capture bits inert, cartridge chip type
++  fixed to EEPROM unless configured. Close these as the oracle diff
++  reaches them; do not pre-build blind.
++
++## Decisions and tooling (2026-10-09)
++
++- **BIOS**: no retail dumps are available; bring-up uses the FreeBIOS path
++  (`third_party/freebios`). It is not melonDS's built-in replacement, so
++  an oracle diff needs `ndsref` to load the same binaries (unverified).
++- **iOS** means a user-built, self-signed app; no prebuilt binaries on any
++  platform. The deliverable is a *builder* that turns the user's ROM into
++  `.exe` / `.app` / `.ipa` (`.ipa` only buildable on a Mac with Xcode).
++- **Windows** is verified by the user running `tools/rh_suite.py` and
++  returning `build-suite/report.json`. The suite checks artifacts and
++  builds only; no gameplay, no benchmarks (AGENTS.md). First macOS run:
++  34 pass / 0 fail / 4 warn. All 165 overlays + ARM9 + ARM7 decode with
++  zero codegen gaps; coverage (indirect targets) is still Phase 3 work.
++- Rerun the suite after any recompiler or portability change:
++  `python tools/rh_suite.py --rom <rom> --work <dir outside iCloud>`.
+diff --git a/docs/rhythm-heaven-plan.md b/docs/rhythm-heaven-plan.md
+new file mode 100644
+index 0000000..94c8574
+--- /dev/null
++++ b/docs/rhythm-heaven-plan.md
+@@ -0,0 +1,200 @@
++# Rhythm Heaven (US) — recompile and port plan
++
++Drafted 2026-10-09 from a read-only survey; decisions and suite added same day. Facts about the ROM, repo and
++machine are in the "TARGET: Rhythm Heaven" section of `CLAUDE.md`; this file
++is only the order of work. Phases are ordered by dependency. Each ends in an
++exit test that can pass or fail.
++
++Standing rules: PRINCIPLES.md / DEBUG.md. Validation is limited by
++`AGENTS.md` (one gameplay run per kind, no benchmark matrices).
++
++## Decisions (settled 2026-10-09)
++
++| # | Decision | Outcome |
++|---|---|---|
++| D1 | BIOS/firmware | No retail dumps on hand. Use the **FreeBIOS path** (`third_party/freebios`, BSD-2, hashes verified by the suite) plus generated firmware. Retail dumps stay the authority for any accuracy claim. Note: this is mstan's FreeBIOS, **not** melonDS's built-in replacement; an oracle diff only works if `ndsref` loads the same `drastic_bios_*.bin` and the same generated firmware (not yet verified, Phase 1). |
++| D2 | Title repo | `rhythmheavenrecomp`. Created at `~/dev/rhythmheavenrecomp` (outside iCloud Drive, which holds the framework checkout). |
++| D3 | iOS meaning | A user-built, self-signed app. No App Store, no prebuilt binary. See "Builder app". |
++| D4 | Windows verification | `tools/rh_suite.py` run by the user on Windows; results come back as `report.json`. |
++
++## Phase 0 — housekeeping (small, do first)
++
++1. Add `*.nds` and `melonDS.app/` to `.gitignore` (the 128 MiB ROM and the
++   app bundle are currently untracked but one `git add .` from being committed).
++2. Move working output out of iCloud: build trees, `generated/`, title banks.
++3. Create the title repo skeleton (D2) and pin this framework as a submodule.
++4. Install deps: `brew install sdl3 libslirp` (confirm what the runner CMake needs).
++
++Exit: clean `git status`; recompiler tests (including the three that take
++`<nds_recompile> <work-dir>` args) pass from the new build dir.
++
++## Phase 1 — runner builds and boots on macOS arm64
++
++Goal: the existing, proven firmware path runs on this Mac. No Rhythm Heaven yet.
++
++1. Make the runner configure on macOS: drop mingw-only link flags, remove the
++   `F:/Projects/recomp-ui` default, make `host_unwind_x64`/`host_profile`
++   compile out (or use a Mach-O unwinder) off Windows, build with
++   `-DNDS_SDL_BACKEND=SDL3`, `NDS_3D_RENDERER=soft`.
++2. Gate Tier-2 / live-overlay (`live_overlay*.cpp`) behind a CMake option,
++   default OFF on Apple targets. This is also the iOS prerequisite.
++3. Produce banks for the BIOSes (retail per D1, else FreeBIOS) and boot to the
++   firmware menu with mouse touch.
++4. Build the oracle (`oracle/setup-melonds.sh` → `ndsref`) on macOS and run G1.
++   Use `melonDS.app` (1.1) only for eyeballing, never as the diff reference.
++
++Exit: G1 passes on macOS with `tier3_insns9 = tier3_insns7 = 0`; menu is
++interactive with the mouse.
++
++## Phase 2 — cartridge boot of Rhythm Heaven (LLE)
++
++1. Boot the ROM through the real BIOS/firmware/card path (`startup_mode =
++   automatic`; secure area re-encrypt already exists). Watch
++   `dispatch_misses.log` and the cart ring to the first game frame.
++2. Determine the save type (melonDS DB or observed AUXSPI traffic) and set
++   `[cartridge]` in the title's `game.toml`. Add persistence if D3 in
++   PLAN.md (host `.sav`) is not already done.
++3. Run from Tier 3 first (the permitted dirty-RAM interpreter on the guest's
++   own bytes) purely to learn which regions are executed and what the
++   hardware touches. Tier 3 is a measuring instrument here, not the deliverable.
++
++Exit: boots to the Rhythm Heaven title screen on both CPUs with no
++unexplained unmapped I/O; save type recorded.
++
++## Phase 3 — static coverage (the core of "recompile")
++
++1. ARM9 main image: recompile from the ROM file at `0x02000000`; ARM7 at
++   `0x02380000`. Use exact entry points from the header plus function
++   discovery; fix any finder gap in the analyzer, not with config hints.
++2. Overlays: generate a bank per overlay (165) straight from the ROM's
++   overlay table, keyed by content with live-byte validation, because 105 + 59
++   + 1 bodies share three RAM addresses. If the framework lacks a
++   per-overlay-id/content-keyed emission mode (`--validate-live-bytes` is the
++   nearest existing flag), add it to the recompiler. Write a tool in the
++   title repo that reads the overlay table and emits the configs.
++3. Reconcile with a runtime capture: every PC the interpreter executed in
++   Phase 2 must be covered by a bank or be explained.
++4. Promote until Tier 3 is idle across a complete play session.
++
++Exit: `dispatch_misses.log` empty; `tier3_insns9`/`tier3_insns7` ≈ 0 over
++boot → title → menu → one minigame; `clean_ram_rejects = 0`.
++
++## Phase 4 — accuracy vs the oracle
++
++1. Byte-lock boot → title → a chosen minigame against fresh `ndsref`
++   (the G3 pattern: sync on hardware events, compare both framebuffers and
++   audio ordinals). First divergence only.
++2. Expect to meet the known gaps in PLAN.md WS-D as the game exercises them
++   (2D windows, display FIFO, SPU capture). Implement each only when the
++   diff demonstrates it, mirroring melonDS as the reference.
++3. Audio is part of correctness for a rhythm game: compare `audio_samples`
++   sample-exact on the same scenario; measure input → audio/video latency in
++   the interactive build.
++
++Exit: the chosen scenario is byte-locked including both framebuffers and audio;
++touch input drives the minigame.
++
++## Phase 5 — desktop deliverables
++
++- **macOS**: arm64 `.app` bundle (universal later if wanted), ROM and BIOS
++  picked by the user at first launch, saves under Application Support, a local
++  "regenerate banks from my ROM" script (needs Xcode CLT).
++- **Windows**: the project's primary supported toolchain (mingw64). Build in
++  CI, port the `.ps1` helper scripts' logic to portable Python where this
++  work depends on them, one user-run gameplay validation.
++- Shared: `game.toml` for the title (`[game].sha1`, `[cartridge]`,
++  `[display]`), key/gamepad bindings, stylus via mouse/trackpad.
++
++Exit: one documented command sequence per OS from "I have my ROM" to a
++playing game; G1 green on both.
++
++## Phase 6 — iOS
++
++Hard constraints from CLAUDE.md: no runtime codegen, GPL-3 source obligations,
++no ROM-derived banks in a shipped binary (D3).
++
++1. Build the runner + banks as static libraries under an Xcode project with
++   SDL3's iOS backend; Tier 2 off, soft renderer.
++2. Touch: the bottom screen is a native pointer surface; keep it a separate
++   path from the button abstraction (as WS-F F2 specifies).
++3. App shell: ROM/BIOS import through the Files picker into the sandbox,
++   saves in app storage, lifecycle (pause on background, flush the save and
++   firmware state on suspend), audio session and low-latency buffer config.
++4. Footprint: title banks are small compared to SM64DS, but confirm compile
++   time and binary size on device-class memory before committing to the layout.
++
++Exit: runs on a physical iPhone/iPad, stylus-equivalent touch works, the
++single gameplay validation run passes.
++
++## Builder app (the deliverable on every platform)
++
++Nothing playable can be shipped prebuilt (banks are ROM-derived), so the
++product is a small app that turns *your* ROM into *your* build:
++
++```
++ROM (+ optional BIOS/firmware dumps)
++   -> verify SHA-1, parse header/overlay table
++   -> nds_recompile (ARM9, ARM7, 165 overlays, content-keyed)
++   -> compile banks + runner with a bundled/located C toolchain
++   -> package: .exe (Windows) | .app (macOS) | .ipa (iOS, unsigned)
++```
++
++Constraints that shape it:
++
++- Windows `.exe`: needs a C/C++ toolchain on the machine. Either bundle one
++  (mingw-w64 / zig cc) or detect and guide. Decide after the Windows suite run.
++- macOS `.app`: needs Xcode command-line tools (or a bundled clang).
++- iOS `.ipa`: can only be built on a Mac with Xcode and Apple's iOS SDK. The
++  builder produces an unsigned `.ipa` / Xcode project; signing and install are
++  the user's (their Apple ID, AltStore/Sideloadly/Xcode). A Windows machine
++  cannot produce it.
++- It reuses the Phase 3 tooling; keep the pipeline a CLI first, then put a thin
++  GUI on it. The builder must never write ROM-derived output anywhere that is
++  uploaded or committed.
++
++Order: CLI pipeline (after Phase 3) -> macOS `.app` output (Phase 5) -> Windows
++`.exe` output -> iOS `.ipa` output (Phase 6) -> GUI shell.
++
++## Test suite (`tools/rh_suite.py`)
++
++Stdlib-only Python, Windows/macOS/Linux, no gameplay and no benchmarking
++(AGENTS.md). Stages: `env`, `rom`, `bios`, `recompiler`, `rom-recompile`,
++`runner` (opt-in, `--runner`). Writes `build-suite/report.json`.
++
++```
++python tools/rh_suite.py --rom "<path to .nds>" [--work <dir>] [--only env,rom] [--cc <compiler>]
++```
++
++First run on macOS arm64 (Apple clang 21), 2026-10-09: **34 pass, 0 fail,
++4 warn, 0 skip** with the ROM present. Confirms: the 6 recompiler tests; ROM
++identity and layout; ARM9 static image uncompressed with ITCM (0x5C0 B) and
++DTCM (0x60 B) autoload blocks; all 165 overlays uncompressed with in-bounds
++FAT entries; ARM9 (633 fns), ARM7 (1414 fns) and all 165 overlays (15,728 fns
++combined) decode with zero codegen gaps; emitted ARM9/ARM7 C compiles. Not yet
++run on Windows, and the runner stage has never passed anywhere in this work.
++
++What the suite does **not** prove: coverage. Entry-only discovery misses
++indirect-call targets (480 indirect sites in ARM9). Runtime-guided discovery
++is Phase 3.
++
++## Dependency graph
++
++```
++P0 → P1 → P2 → P3 → P4 → P5 (macOS, Windows) ─┐
++                      └──────────────→ P6 (iOS) ┘
++```
++
++P5 and P6 only need P1's portability work plus P4's correctness; they can
++overlap. P6 starts after P5-macOS because it reuses its app shell and config.
++
++## Biggest risks
++
++1. **Overlay handling**: 165 bodies at 3 addresses. If keyed by PC the game
++   will silently run the wrong function. Mitigation: content keys, fail-closed
++   guards, empty `dispatch_misses.log` as a hard gate.
++2. **No BIOS/firmware dumps** (D1). The accuracy claim depends on them.
++3. **Unimplemented 2D features** for a sprite-heavy game; unknown until the
++   first oracle diff.
++4. **Latency** on Apple platforms (audio buffers, vsync) in a timing-judged game.
++5. **iOS distribution**: licensing and ROM-derived code limit this to
++   self-built installs.
+diff --git a/tools/rh_suite.py b/tools/rh_suite.py
+new file mode 100644
+index 0000000..5d9c040
+--- /dev/null
++++ b/tools/rh_suite.py
+@@ -0,0 +1,526 @@
++#!/usr/bin/env python3
++"""Rhythm Heaven port readiness suite (Windows / macOS / Linux).
++
++Stdlib only. Run from anywhere:
++
++    python tools/rh_suite.py --rom "path/to/Rhythm Heaven (US).nds"
++    python tools/rh_suite.py --rom <rom> --only env,rom      # subset
++    python tools/rh_suite.py --rom <rom> --runner             # + runner build
++
++It checks artifacts and build health only. It does not run gameplay and it
++does not benchmark (see AGENTS.md). The ROM is read, never copied into the
++repo; all output goes to --work (default build-suite/), which is gitignored.
++
++Result per check: PASS | FAIL | WARN | SKIP. Exit status is 1 if any FAIL.
++Send back <work>/report.json (no ROM content, no paths outside the repo
++other than the ones you pass) after running on a new machine.
++"""
++import argparse
++import hashlib
++import json
++import os
++import platform
++import shutil
++import struct
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parent.parent
++EXE = ".exe" if os.name == "nt" else ""
++
++RH_SHA1 = "601b92b1603f1822543e264df55ab4152ded356c"
++RH_GAMECODE = b"YLZE"
++RH_ARM9 = dict(off=0x4000, size=0x53B98, load=0x02000000, entry=0x02000800)
++RH_ARM7 = dict(off=0x15D400, size=0x26F28, load=0x02380000, entry=0x02380000)
++RH_OVL9 = dict(table=0x57C00, size=0x14A0)
++RH_EXPECT_OVERLAYS = 165
++RH_EXPECT_SLOTS = {0x0228FA60: 105, 0x02287660: 59, 0x0227CB20: 1}
++BIOS_SHA1 = {
++    "biosnds9.rom": "bfaac75f101c135e32e2aaf541de6b1be4c8c62d",
++    "biosnds7.rom": "24f67bdea115a2c847c8813a262502ee1607b7df",
++    "firmware.bin": "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b",
++}
++FREEBIOS_SHA1 = {
++    "drastic_bios_arm9.bin": "b85d6afdbf65d87c9ab11d4e7fb5ecfd6192ccf8",
++    "drastic_bios_arm7.bin": "eaab9b21610978f05a0eb14a9c8ff345698f56a2",
++}
++
++results = []
++
++
++def record(group, name, status, detail="", secs=None):
++    results.append(dict(group=group, name=name, status=status,
++                        detail=detail, secs=None if secs is None else round(secs, 2)))
++    tag = {"PASS": "PASS", "FAIL": "FAIL", "WARN": "WARN", "SKIP": "skip"}[status]
++    line = f"  [{tag}] {group}/{name}"
++    if detail:
++        line += f" - {detail}"
++    print(line, flush=True)
++
++
++def sha1_file(p):
++    h = hashlib.sha1()
++    with open(p, "rb") as f:
++        for chunk in iter(lambda: f.read(1 << 20), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run(cmd, cwd=None, timeout=1800, env=None):
++    t = time.time()
++    try:
++        p = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env, timeout=timeout,
++                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
++                           errors="replace")
++        return p.returncode, p.stdout, time.time() - t
++    except FileNotFoundError as e:
++        return 127, str(e), time.time() - t
++    except subprocess.TimeoutExpired as e:
++        return 124, f"timeout after {timeout}s\n{e.stdout or ''}", time.time() - t
++
++
++def tail(text, n=6):
++    return " | ".join(l for l in text.strip().splitlines()[-n:])
++
++
++# ── env ─────────────────────────────────────────────────────────────────
++def find_c_compiler(override):
++    for c in ([override] if override else ["clang", "gcc", "cc", "cl"]):
++        if c and shutil.which(c):
++            return shutil.which(c)
++    return None
++
++
++def stage_env(ctx):
++    g = "env"
++    record(g, "platform", "PASS",
++           f"{platform.system()} {platform.release()} {platform.machine()}, "
++           f"python {platform.python_version()}")
++    if sys.version_info < (3, 8):
++        record(g, "python>=3.8", "FAIL", platform.python_version())
++    for t in ("cmake", "ninja", "git"):
++        p = shutil.which(t)
++        if not p:
++            record(g, t, "FAIL" if t == "cmake" else "WARN", "not on PATH")
++        else:
++            rc, out, _ = run([p, "--version"])
++            record(g, t, "PASS", out.splitlines()[0] if out else p)
++    cc = find_c_compiler(ctx.cc)
++    ctx.cc = cc
++    cxx = shutil.which("clang++") or shutil.which("g++") or shutil.which("c++") or shutil.which("cl")
++    ctx.cxx = cxx
++    if cc and cxx:
++        rc, out, _ = run([cc, "--version"] if not cc.lower().endswith("cl.exe") else [cc])
++        record(g, "c/c++ compiler", "PASS", f"{Path(cc).name}, {Path(cxx).name}: "
++               f"{(out.splitlines() or [''])[0]}")
++    else:
++        record(g, "c/c++ compiler", "FAIL", "need clang/gcc (mingw64 on Windows) on PATH")
++    free = shutil.disk_usage(ctx.work.parent if ctx.work.parent.exists() else REPO).free
++    record(g, "free disk", "PASS" if free > 5 << 30 else "WARN", f"{free >> 30} GiB")
++    if "iCloud" in str(REPO) or "Mobile Documents" in str(REPO):
++        record(g, "repo location", "WARN",
++               "repo is under iCloud Drive; pass --work outside it for big builds")
++    core = REPO / "external/arm-recomp-core/CMakeLists.txt"
++    record(g, "submodule arm-recomp-core", "PASS" if core.exists() else "FAIL",
++           "" if core.exists() else "run: git submodule update --init --recursive")
++    fb = REPO / "third_party/freebios/drastic_bios_arm9.bin"
++    record(g, "submodule freebios", "PASS" if fb.exists() else "WARN",
++           "" if fb.exists() else "git submodule update --init (dump-free boot path)")
++
++
++# ── inputs ──────────────────────────────────────────────────────────────
++def find_rom(arg):
++    cands = [arg] if arg else []
++    cands += [os.environ.get("RH_ROM")]
++    cands += [str(p) for p in REPO.glob("*.nds")]
++    for c in cands:
++        if c and Path(c).is_file():
++            return Path(c)
++    return None
++
++
++def stage_rom(ctx):
++    g = "rom"
++    rom = find_rom(ctx.rom_arg)
++    if not rom:
++        record(g, "rom present", "FAIL", "pass --rom <file> or set RH_ROM")
++        return
++    ctx.rom = rom
++    data = rom.read_bytes()
++    ctx.rom_data = data
++    record(g, "rom present", "PASS", f"{len(data) >> 20} MiB")
++    sha = hashlib.sha1(data).hexdigest()
++    record(g, "sha1", "PASS" if sha == RH_SHA1 else "WARN",
++           sha if sha == RH_SHA1 else f"{sha} (expected {RH_SHA1}; other dump/revision - "
++           "the checks below still run but the pinned identity will not match)")
++    title, code = data[0:12], data[12:16]
++    ok = code == RH_GAMECODE and title.startswith(b"RHYTHM")
++    record(g, "header", "PASS" if ok else "FAIL",
++           f"title={title!r} code={code!r} unit={data[0x12]}")
++    a9 = struct.unpack("<IIII", data[0x20:0x30])
++    a7 = struct.unpack("<IIII", data[0x30:0x40])
++    hdr_ok = (a9 == (RH_ARM9["off"], RH_ARM9["entry"], RH_ARM9["load"], RH_ARM9["size"]) and
++              a7 == (RH_ARM7["off"], RH_ARM7["entry"], RH_ARM7["load"], RH_ARM7["size"]))
++    record(g, "arm9/arm7 layout", "PASS" if hdr_ok else "WARN",
++           f"arm9={[hex(x) for x in a9]} arm7={[hex(x) for x in a7]}")
++    ctx.arm9 = data[a9[0]:a9[0] + a9[3]]
++    ctx.arm7 = data[a7[0]:a7[0] + a7[3]]
++    ctx.a9 = dict(off=a9[0], entry=a9[1], load=a9[2], size=a9[3])
++    ctx.a7 = dict(off=a7[0], entry=a7[1], load=a7[2], size=a7[3])
++
++    # secure area normal form
++    sa = data[0x4000:0x4008]
++    form = ("encrypted" if sa == b"encryObj" else
++            "decrypted" if sa == bytes.fromhex("ffdeffe7ffdeffe7") else "unknown")
++    record(g, "secure area", "PASS" if form != "unknown" else "WARN", form)
++
++    # module params: compressed static?
++    i = ctx.arm9.find(bytes.fromhex("2106c0de"))
++    if i >= 0x1C:
++        mp = struct.unpack("<9I", ctx.arm9[i - 0x1C:i + 8])
++        comp = mp[5]
++        record(g, "arm9 static compression", "PASS" if comp == 0 else "FAIL",
++               "uncompressed" if comp == 0 else f"compressed_static_end={comp:#x}")
++        al_lo, al_hi = mp[0] - ctx.a9["load"], mp[1] - ctx.a9["load"]
++        n = (al_hi - al_lo) // 12
++        blocks = [struct.unpack("<III", ctx.arm9[al_lo + 12 * k:al_lo + 12 * k + 12])
++                  for k in range(n)]
++        ctx.autoload = blocks
++        record(g, "autoload blocks", "PASS",
++               ", ".join(f"{a:#x}+{s:#x}(+bss {b:#x})" for a, s, b in blocks))
++    else:
++        record(g, "module params", "FAIL", "nitrocode marker not found in ARM9 image")
++
++    # overlays
++    t = struct.unpack("<I", data[0x50:0x54])[0]
++    n = struct.unpack("<I", data[0x54:0x58])[0]
++    cnt = n // 32
++    ents = [struct.unpack("<IIIIIIII", data[t + 32 * k:t + 32 * k + 32]) for k in range(cnt)]
++    ctx.overlays = ents
++    slots = {}
++    for e in ents:
++        slots[e[1]] = slots.get(e[1], 0) + 1
++    comp = sum(1 for e in ents if e[7] >> 24 & 1)
++    record(g, "arm9 overlays", "PASS" if cnt == RH_EXPECT_OVERLAYS else "WARN", f"{cnt}")
++    record(g, "overlay ram slots", "PASS" if slots == RH_EXPECT_SLOTS else "WARN",
++           ", ".join(f"{a:#x}x{c}" for a, c in sorted(slots.items())))
++    record(g, "overlays compressed", "PASS" if comp == 0 else "FAIL",
++           f"{comp} compressed (recompile needs decompression first)" if comp else "0")
++    # file bounds
++    FAT = struct.unpack("<II", data[0x48:0x50])
++    bad = 0
++    # overlay table word 6 is the FAT file id
++    for e in ents:
++        fid = e[6]
++        s, en = struct.unpack("<II", data[FAT[0] + 8 * fid:FAT[0] + 8 * fid + 8])
++        if not (0 < s < en <= len(data)) or en - s < e[2]:
++            bad += 1
++    record(g, "overlay file bounds", "PASS" if bad == 0 else "FAIL", f"{bad} bad of {cnt}")
++    if ctx.rom_dir_is_repo():
++        record(g, "rom location", "WARN" if not ctx.rom_ignored() else "PASS",
++               "ROM sits inside the repo; *.nds must be gitignored before any commit")
++
++
++def stage_bios(ctx):
++    g = "bios"
++    bdir = REPO / "bios"
++    have = {n: (bdir / n) for n in BIOS_SHA1 if (bdir / n).is_file()}
++    if not have:
++        record(g, "retail dumps", "WARN",
++               "none in bios/ - faithful/oracle path unavailable; FreeBIOS path only")
++    for n, p in have.items():
++        s = sha1_file(p)
++        record(g, n, "PASS" if s == BIOS_SHA1[n] else "FAIL", s)
++    fdir = REPO / "third_party/freebios"
++    for n, want in FREEBIOS_SHA1.items():
++        p = fdir / n
++        if p.is_file():
++            s = sha1_file(p)
++            record(g, "freebios/" + n, "PASS" if s == want else "FAIL", s)
++        else:
++            record(g, "freebios/" + n, "SKIP", "submodule not initialised")
++
++
++# ── recompiler ──────────────────────────────────────────────────────────
++def stage_recompiler(ctx):
++    g = "recompiler"
++    if not shutil.which("cmake"):
++        record(g, "configure", "SKIP", "cmake missing")
++        return
++    bdir = ctx.work / "recompiler-build"
++    gen = []
++    if shutil.which("ninja"):
++        gen = ["-G", "Ninja"]
++    elif os.name == "nt" and shutil.which("mingw32-make"):
++        gen = ["-G", "MinGW Makefiles"]
++    cfg = ["cmake", *gen, "-S", REPO / "recompiler", "-B", bdir,
++           "-DCMAKE_BUILD_TYPE=Release"]
++    if ctx.cc:
++        cfg.append(f"-DCMAKE_C_COMPILER={ctx.cc}")
++    if ctx.cxx:
++        cfg.append(f"-DCMAKE_CXX_COMPILER={ctx.cxx}")
++    rc, out, dt = run(cfg)
++    record(g, "configure", "PASS" if rc == 0 else "FAIL", tail(out, 3) if rc else "", dt)
++    if rc:
++        return
++    rc, out, dt = run(["cmake", "--build", bdir, "--parallel", str(os.cpu_count() or 4)])
++    record(g, "build", "PASS" if rc == 0 else "FAIL", tail(out, 4) if rc else "", dt)
++    if rc:
++        return
++    ctx.nds_recompile = bdir / ("nds_recompile" + EXE)
++    if not ctx.nds_recompile.exists():  # multi-config generators
++        for sub in ("Release", "Debug"):
++            if (bdir / sub / ("nds_recompile" + EXE)).exists():
++                ctx.nds_recompile = bdir / sub / ("nds_recompile" + EXE)
++    exe = lambda n: ctx.nds_recompile.parent / (n + EXE)
++    tw = ctx.work / "recompiler-tests"
++    shutil.rmtree(tw, ignore_errors=True)
++    tw.mkdir(parents=True)
++    tests = [
++        ("armv5te_decode_test", []),
++        ("interpreter_cycle_test", []),
++        ("hle_manifest_test", []),
++        ("codegen_golden_test", [ctx.nds_recompile, tw / "golden",
++                                 REPO / "recompiler/tests/codegen_golden.txt"]),
++        ("interior_entry_fail_closed_test", [ctx.nds_recompile, tw / "interior"]),
++        ("live_transfer_validation_test", [ctx.nds_recompile, tw / "live"]),
++    ]
++    for name, args in tests:
++        if not exe(name).exists():
++            record(g, name, "SKIP", "binary not built")
++            continue
++        for a in args:
++            if isinstance(a, Path) and a.suffix == "" and "golden" not in a.name \
++                    and a != ctx.nds_recompile:
++                a.mkdir(parents=True, exist_ok=True)
++        rc, out, dt = run([exe(name), *args], cwd=REPO / "recompiler")
++        record(g, name, "PASS" if rc == 0 else "FAIL", tail(out, 4) if rc else "", dt)
++
++
++# ── recompile the ROM's code, compile the C ─────────────────────────────
++def toml_for(id_, name, cpu, isa, load, size, entry, sha1, extra=""):
++    return (f'[program]\nname = "{name}"\nid = "{id_}"\ncpu = "{cpu}"\nisa = "{isa}"\n'
++            f'load_address = {load:#010x}\nsize = {size:#010x}\nentry_pc = {entry:#010x}\n\n'
++            f'[identity]\nsha1 = "{sha1}"\n\n[[entry_point]]\naddr = {entry:#010x}\n'
++            f'mode = "arm"\nname = "_start"\n{extra}')
++
++
++def include_args(ctx):
++    incs = [REPO / "recompiler/armv4t", REPO / "external/arm-recomp-core/common",
++            REPO / "external/arm-recomp-core/armv4t"]
++    return [f"-I{p}" for p in incs if p.exists()]
++
++
++def compile_c(ctx, src, obj):
++    if ctx.cc and Path(ctx.cc).name.lower() in ("cl", "cl.exe"):
++        return run([ctx.cc, "/nologo", "/c", "/std:c11", *[a.replace("-I", "/I") for a in include_args(ctx)],
++                    f"/Fo{obj}", src])
++    return run([ctx.cc, "-std=c11", "-O0", "-c", *include_args(ctx), "-o", obj, src])
++
++
++def recomp_one(ctx, g, label, cpu, isa, blob, load, entry, tag):
++    wd = ctx.work / "rom-banks" / tag
++    shutil.rmtree(wd, ignore_errors=True)
++    (wd / "out").mkdir(parents=True)
++    (wd / f"{tag}.bin").write_bytes(blob)
++    sha = hashlib.sha1(blob).hexdigest()
++    cfg = wd / f"{tag}.toml"
++    cfg.write_text(toml_for(tag, label, cpu, isa, load, len(blob), entry, sha))
++    rc, out, dt = run([ctx.nds_recompile, "--config", cfg, "--bin", wd / f"{tag}.bin", "--audit"])
++    gaps = False
++    if "NOT-IMPLEMENTED ops" in out:
++        after = out.split("NOT-IMPLEMENTED ops", 1)[1].splitlines()[1:3]
++        gaps = not any("(none)" in l for l in after)
++    funcs = next((l.strip() for l in out.splitlines() if l.startswith("[finder] functions=")), "")
++    record(g, f"{tag} audit", "PASS" if rc == 0 and not gaps and funcs else "FAIL",
++           funcs or tail(out, 2), dt)
++    if rc:
++        return
++    rc, out, dt = run([ctx.nds_recompile, "--config", cfg, "--bin", wd / f"{tag}.bin",
++                       "--out", wd / "out", "--bank", tag])
++    srcs = sorted((wd / "out").glob("*.c"))
++    record(g, f"{tag} emit", "PASS" if rc == 0 and srcs else "FAIL",
++           f"{len(srcs)} C files, {sum(s.stat().st_size for s in srcs) >> 10} KiB", dt)
++    if not (rc == 0 and srcs and ctx.cc):
++        return
++    bad = []
++    t = time.time()
++    for s in srcs:
++        r, o, _ = compile_c(ctx, s, wd / (s.stem + ".o"))
++        if r:
++            bad.append(f"{s.name}: {tail(o, 2)}")
++    record(g, f"{tag} C compile", "PASS" if not bad else "FAIL",
++           "" if not bad else bad[0], time.time() - t)
++
++
++def stage_rom_recompile(ctx):
++    g = "rom-recompile"
++    if not getattr(ctx, "rom_data", None):
++        record(g, "all", "SKIP", "no ROM")
++        return
++    if not getattr(ctx, "nds_recompile", None):
++        record(g, "all", "SKIP", "recompiler not built")
++        return
++    recomp_one(ctx, g, "Rhythm Heaven ARM9 static", "arm9", "armv5te", ctx.arm9,
++               ctx.a9["load"], ctx.a9["entry"], "rh_arm9")
++    recomp_one(ctx, g, "Rhythm Heaven ARM7", "arm7", "armv4t", ctx.arm7,
++               ctx.a7["load"], ctx.a7["entry"], "rh_arm7")
++    # Overlays: every one must decode with zero gaps. Overlays are plain
++    # uncompressed bytes, so they can be audited straight from the ROM.
++    ov_dir = ctx.work / "rom-banks" / "overlays"
++    shutil.rmtree(ov_dir, ignore_errors=True)
++    ov_dir.mkdir(parents=True)
++    FAT = struct.unpack("<II", ctx.rom_data[0x48:0x50])[0]
++    failed, undef_ovs, total_funcs, t0 = [], [], 0, time.time()
++    for e in ctx.overlays:
++        ovid, ram, size, fid = e[0], e[1], e[2], e[6]
++        s, en = struct.unpack("<II", ctx.rom_data[FAT + 8 * fid:FAT + 8 * fid + 8])
++        blob = ctx.rom_data[s:s + size]
++        tag = f"ov{ovid:03d}"
++        (ov_dir / f"{tag}.bin").write_bytes(blob)
++        (ov_dir / f"{tag}.toml").write_text(toml_for(
++            tag, f"RH overlay {ovid}", "arm9", "armv5te", ram, len(blob), ram,
++            hashlib.sha1(blob).hexdigest()))
++        rc, out, _ = run([ctx.nds_recompile, "--config", ov_dir / f"{tag}.toml",
++                          "--bin", ov_dir / f"{tag}.bin", "--audit"], timeout=300)
++        m = next((l for l in out.splitlines() if l.startswith("[finder] functions=")), "")
++        gap = False
++        if "NOT-IMPLEMENTED ops" in out:
++            after = out.split("NOT-IMPLEMENTED ops", 1)[1].splitlines()[1:3]
++            gap = not any("(none)" in l for l in after)
++        if rc != 0 or not m or gap:
++            failed.append(f"{tag}: rc={rc} gap={gap}")
++            continue
++        total_funcs += int(m.split("functions=")[1].split()[0])
++        if "undefined=0" not in m:
++            undef_ovs.append(tag)
++    record(g, "overlays audit", "PASS" if not failed else "FAIL",
++           f"{len(ctx.overlays) - len(failed)}/{len(ctx.overlays)} decode with no codegen gaps, "
++           f"{total_funcs} fns" + ("" if not failed else f"; first fail: {failed[0]}"),
++           time.time() - t0)
++    if undef_ovs:
++        record(g, "overlays undecoded words", "WARN",
++               f"{len(undef_ovs)} overlays hit non-instruction words during entry-only "
++               "discovery (typically strings/literal pools); informational")
++    record(g, "coverage note", "WARN",
++           "entry-only discovery; ARM9 has many indirect calls (vtables). "
++           "Real coverage comes from Phase 3 (runtime captures + per-overlay entry maps).")
++
++
++# ── runner (opt-in; expected to fail until the macOS port lands) ────────
++def stage_runner(ctx):
++    g = "runner"
++    if not ctx.runner:
++        record(g, "build", "SKIP", "pass --runner to attempt")
++        return
++    gen = REPO / "generated"
++    need = ["arm9_bios.c", "arm7_bios.c"]
++    free_ok = all((REPO / "third_party/freebios" / n).exists()
++                  for n in FREEBIOS_SHA1)
++    have_dumps = all((REPO / "bios" / n).exists() for n in ("biosnds9.rom", "biosnds7.rom"))
++    if not (free_ok or have_dumps):
++        record(g, "inputs", "SKIP", "neither retail dumps nor FreeBIOS binaries present")
++        return
++    bdir = ctx.work / "runner-build"
++    cfg = ["cmake", "-S", REPO / "runner", "-B", bdir, "-DCMAKE_BUILD_TYPE=Release",
++           "-DNDS_SDL_BACKEND=NONE", "-DNDS_BOOTSTRAP_FIRMWARE=ON",
++           f"-DNDS_GENERATED_DIR={ctx.work / 'generated'}"]
++    if shutil.which("ninja"):
++        cfg[1:1] = ["-G", "Ninja"]
++    (ctx.work / "generated").mkdir(parents=True, exist_ok=True)
++    if not ctx.nds_recompile:
++        record(g, "bios banks", "SKIP", "recompiler not built")
++        return
++    jobs = []
++    if have_dumps:
++        jobs += [("arm9_bios", "biosnds9"), ("arm7_bios", "biosnds7")]
++        src = lambda b: REPO / "bios" / (b + ".rom")
++    for bank, base in jobs:
++        rc, out, dt = run([ctx.nds_recompile, "--config", REPO / "bios" / (base + ".toml"),
++                           "--bin", src(base), "--out", ctx.work / "generated", "--bank", bank])
++        record(g, f"emit {bank}", "PASS" if rc == 0 else "FAIL", tail(out, 2) if rc else "", dt)
++    if not have_dumps:
++        record(g, "bios banks", "SKIP",
++               "FreeBIOS bank generation needs the freebios arm9/arm7 configs wired; "
++               "see docs/rhythm-heaven-plan.md Phase 1")
++        return
++    rc, out, dt = run(cfg)
++    record(g, "configure", "PASS" if rc == 0 else "FAIL", tail(out, 5) if rc else "", dt)
++    if rc:
++        return
++    rc, out, dt = run(["cmake", "--build", bdir, "--parallel", str(os.cpu_count() or 4)],
++                      timeout=3600)
++    record(g, "build", "PASS" if rc == 0 else "FAIL", tail(out, 5) if rc else "", dt)
++
++
++# ── driver ──────────────────────────────────────────────────────────────
++class Ctx:
++    cc = cxx = None
++    nds_recompile = None
++    rom = None
++    rom_data = None
++    work = None
++
++    def rom_ignored(self):
++        rc, _, _ = run(["git", "check-ignore", "-q", str(self.rom)], cwd=REPO)
++        return rc == 0
++
++    def rom_dir_is_repo(self):
++        try:
++            self.rom.resolve().relative_to(REPO)
++            return True
++        except ValueError:
++            return False
++
++
++STAGES = [("env", stage_env), ("rom", stage_rom), ("bios", stage_bios),
++          ("recompiler", stage_recompiler), ("rom-recompile", stage_rom_recompile),
++          ("runner", stage_runner)]
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__,
++                                 formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--rom")
++    ap.add_argument("--work", default=str(REPO / "build-suite"))
++    ap.add_argument("--only", help="comma list of: " + ",".join(n for n, _ in STAGES))
++    ap.add_argument("--cc", help="C compiler override")
++    ap.add_argument("--runner", action="store_true", help="also attempt the runner build")
++    a = ap.parse_args()
++    ctx = Ctx()
++    ctx.rom_arg, ctx.cc, ctx.runner = a.rom, a.cc, a.runner
++    ctx.work = Path(a.work).resolve()
++    ctx.work.mkdir(parents=True, exist_ok=True)
++    only = set(a.only.split(",")) if a.only else None
++    t0 = time.time()
++    print(f"rh_suite: repo={REPO}\n          work={ctx.work}")
++    for name, fn in STAGES:
++        if only and name not in only:
++            continue
++        # later stages need earlier context even if not selected
++        print(f"== {name}")
++        try:
++            fn(ctx)
++        except Exception as e:  # a crash in a stage is a failure, not a pass
++            record(name, "stage crashed", "FAIL", f"{type(e).__name__}: {e}")
++        if name == "env" and not ctx.cc:
++            find_c_compiler(None)
++    counts = {s: sum(1 for r in results if r["status"] == s)
++              for s in ("PASS", "FAIL", "WARN", "SKIP")}
++    report = dict(
++        when=time.strftime("%Y-%m-%dT%H:%M:%S"),
++        machine=dict(system=platform.system(), release=platform.release(),
++                     arch=platform.machine(), python=platform.python_version()),
++        rom_sha1=hashlib.sha1(ctx.rom_data).hexdigest() if ctx.rom_data else None,
++        git_head=run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO)[1].strip(),
++        counts=counts, seconds=round(time.time() - t0, 1), results=results)
++    (ctx.work / "report.json").write_text(json.dumps(report, indent=2))
++    print(f"\n{counts['PASS']} pass, {counts['FAIL']} fail, {counts['WARN']} warn, "
++          f"{counts['SKIP']} skip  ({report['seconds']}s)\nreport: {ctx.work / 'report.json'}")
++    return 1 if counts["FAIL"] else 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.54.0 (Apple Git-157)
+
