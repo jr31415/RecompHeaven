@@ -15,7 +15,7 @@ from multiprocessing import Pool
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rhplay import Session, boot_to_map, pan  # noqa: E402
+from rhplay import Session, boot_to_map, pan, tap_game_tile  # noqa: E402
 
 
 def fuzz_run(job):
@@ -32,7 +32,7 @@ def fuzz_run(job):
         boot_to_map(s); s.run(5)
         for hx, hy, dx, dy in game["chain"]:
             pan(s, hx, hy, dx, dy)
-        s.touch(game["x"], game["y"], 6); s.run(40); s.touch(game["x"], game["y"], 6); s.run(120)
+        tap_game_tile(s, game); s.run(40); s.touch(game["x"], game["y"], 6); s.run(120)
         mode = seed % 3          # 0 sparse, 1 dense, 2 beat-locked
         period = rnd.choice([20, 24, 26, 28, 30, 32, 36, 40])
         phase = rnd.randrange(period)

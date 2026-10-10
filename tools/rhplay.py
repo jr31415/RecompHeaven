@@ -149,8 +149,8 @@ def find_tiles(w, h, rgb):
 
 def tile_hash(w, h, rgb, cx, cy):
     """Hash of the tile's inner picture (ignores the PERFECT/rank ribbon at the edges)."""
-    x0, y0 = max(0, cx - 12), max(0, cy - 12)
-    data = b"".join(rgb[((y0 + j) * w + x0) * 3:((y0 + j) * w + min(w, x0 + 24)) * 3] for j in range(24) if y0 + j < h)
+    x0, y0 = max(0, cx - 15), max(0, cy - 15)
+    data = b"".join(rgb[((y0 + j) * w + x0) * 3:((y0 + j) * w + min(w, x0 + 30)) * 3] for j in range(30) if y0 + j < h)
     return hashlib.sha1(data).hexdigest()[:10]
 
 
@@ -168,3 +168,17 @@ def boot_to_map(s):
 def pan(s, hx, hy, dx, dy):
     x1 = max(8, min(247, hx + dx)); y1 = max(8, min(184, hy + dy))
     s.flick(hx, hy, x1, y1, 22); s.run(80)
+
+
+def tap_game_tile(s, game, hold=6):
+    """Find the game's tile by picture in the current map view and tap it. False if absent."""
+    w, h, rgb = s.grab()[1]
+    want = set(game.get("hashes", []))
+    for cx, cy in find_tiles(w, h, rgb):
+        if cx < 20 or cx > w - 20 or cy < 18 or cy > h - 18:
+            continue
+        if tile_hash(w, h, rgb, cx, cy) in want:
+            s.touch(cx, cy, hold)
+            return True
+    s.touch(game["x"], game["y"], hold)
+    return False
