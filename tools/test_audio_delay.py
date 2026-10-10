@@ -31,7 +31,7 @@ import argparse, json, os, socket, subprocess, sys, time
 from pathlib import Path
 
 HOME = Path.home()
-DEFAULT_RUNNER = HOME / "dev/rh-build/runner-play/nds_runner"
+DEFAULT_RUNNER = HOME / "dev/rh-build/runner-play4/nds_runner"
 STREAM_RATE = 32728.0
 
 

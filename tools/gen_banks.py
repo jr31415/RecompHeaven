@@ -14,11 +14,13 @@ from pathlib import Path
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--recompiler", required=True); ap.add_argument("--images", required=True)
-ap.add_argument("--ingest", required=True); ap.add_argument("--out", required=True)
+ap.add_argument("--ingest", required=True, nargs="+",
+                help="one or more ingest dirs; seeds are unioned per module (monotonic)"); ap.add_argument("--out", required=True)
 ap.add_argument("--all-overlays", action="store_true",
                 help="also emit every ROM overlay at its table address (entry-only discovery)")
 a = ap.parse_args()
-img, ing, out = Path(a.images), Path(a.ingest), Path(a.out)
+img, out = Path(a.images), Path(a.out)
+ingests = [Path(p) for p in a.ingest]
 shutil.rmtree(out, ignore_errors=True); out.mkdir(parents=True)
 work = out.parent / (out.name + "-work"); shutil.rmtree(work, ignore_errors=True); work.mkdir(parents=True)
 
@@ -41,22 +43,30 @@ def add(bid, cpu, isa, base, blob, seeds):
 
 mods = {"arm9": img / "arm9.bin", "arm7": img / "arm7.bin"}
 for p in sorted((img / "overlays").glob("ov*.bin")): mods[p.stem] = p
-seed_dir = ing / "seeds"
-for sf in sorted(seed_dir.glob("*.toml")):
-    m = re.match(r"(arm9|arm7)_([a-z0-9]+)_([0-9a-f]+)$", sf.stem)
+seed_files = {}
+for ing in ingests:
+    for sf in sorted((ing / "seeds").glob("*.toml")):
+        seed_files.setdefault(sf.stem, []).append(sf)
+for stem, sfs in sorted(seed_files.items()):
+    m = re.match(r"(arm9|arm7)_([a-z0-9]+)_([0-9a-f]+)$", stem)
     if not m or m.group(2) == "unresolved": continue
+    sf = sfs[0]
     cpu, mod, base = m.group(1), m.group(2), int(m.group(3), 16)
-    if mod not in mods: print("skip (no image):", sf.name); continue
+    if mod not in mods: print("skip (no image):", stem); continue
     blob = mods[mod].read_bytes()
     add(f"rh_{cpu}_{mod}_{base:08x}", cpu, "armv5te" if cpu == "arm9" else "armv4t",
-        base, blob, entries_of(sf))
+        base, blob,
+        [e for f in sfs for e in entries_of(f)])
 
 # Runtime-materialised pages that exist nowhere in the ROM (ingest wrote bin+toml).
-for t in sorted((ing / "images").glob("rh_*.toml")):
-    b = t.with_suffix(".bin")
-    if not b.exists(): continue
-    txt = t.read_text(); bid = re.search(r'id\s*=\s*"([^"]+)"', txt).group(1)
-    jobs.append((bid, txt, b.read_bytes()))
+page_ids = set()
+for ing in ingests:
+    for t in sorted((ing / "images").glob("rh_*.toml")):
+        b = t.with_suffix(".bin")
+        if not b.exists(): continue
+        txt = t.read_text(); bid = re.search(r'id\s*=\s*"([^"]+)"', txt).group(1)
+        if bid in page_ids: continue
+        page_ids.add(bid); jobs.append((bid, txt, b.read_bytes()))
 
 if a.all_overlays:
     ov = json.loads((img / "overlays.json").read_text())

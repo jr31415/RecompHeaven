@@ -64,4 +64,11 @@ Then prepare_images -> capture (interpreted runner) -> FW/tools/ingest_coverage_
 - A window: SDL3 is not installed (`brew install sdl3`, then configure with
   -DNDS_SDL_BACKEND=SDL3). Until then it is headless + PNGs.
 - Note: the third ingest (adding a banked-runner manifest) *regressed* Tier 3
-  (13.6K -> 1.1M ARM9 insns). Use titlebanks2 / runner-title2 as the baseline.
+  (13.6K -> 1.1M ARM9 insns) because it was merged without `--owned-rows-*`.
+
+## Coverage close-out (2026-10-10)
+`ingest4` = all play-session manifests ingested with `--owned-rows-arm9/--owned-rows-arm7 titlebanks2`
+(residual only). `gen_banks.py --ingest ingest2 ingest4 ...` unions seed sets (monotonic) -> `titlebanks4`
+(306 banks, ~396 MB C); runner build dir `runner-play4`. Scripted minigame launch from the 100% save:
+54.6M -> 2.0M interpreted ARM9 insns, frame digests identical. Repeat: play, ingest the new session
+manifests with `--owned-rows-*` pointing at the current bank dir, regen with all previous ingest dirs.

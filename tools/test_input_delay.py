@@ -20,7 +20,7 @@ not over the debug socket, whose handlers run on the emulation thread.
 import argparse, json, os, random, socket, subprocess, sys, time
 from pathlib import Path
 
-DEFAULT_RUNNER = Path.home() / "dev/rh-build/runner-play/nds_runner"
+DEFAULT_RUNNER = Path.home() / "dev/rh-build/runner-play4/nds_runner"
 MODES = {
     # The previous behaviour: input applied once per frame, on one thread.
     "per-frame": {"NDS_THREADED_PRESENT": "0", "NDS_PRESENT_THREAD": "0",

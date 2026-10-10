@@ -11,10 +11,10 @@
 # Emulation + audio run on a worker thread; the main thread only presents
 # (vsync) so a late frame never starves the audio clock. NDS_THREADED_PRESENT=0
 # goes back to the single-thread loop.
-# Needs the SDL3 build at ~/dev/rh-build/runner-play (see docs/RUNNING.md).
+# Needs the SDL3 build at ~/dev/rh-build/runner-play4 (see docs/RUNNING.md).
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ROM="${ROM:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/ndsrecomp/3588 - Rhythm Heaven (US)(XenoPhobia).nds}"
-RUNNER="${RUNNER:-$HOME/dev/rh-build/runner-play/nds_runner}"
+RUNNER="${RUNNER:-$HOME/dev/rh-build/runner-play4/nds_runner}"
 ROT="${1:-270}"
 SAVEDIR="$HOME/Library/Application Support/RhythmHeavenRecomp"
 mkdir -p "$SAVEDIR" "$HOME/dev/rh-build/play" "$HOME/dev/rh-build/coverage"
