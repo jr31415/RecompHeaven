@@ -4,10 +4,14 @@ sha1 = "601b92b1603f1822543e264df55ab4152ded356c"
 
 [display]
 screen_layout = "stacked"   # stacked | separate
+screen_rotation = "270"    # book-style grip: top screen on the left
 
 [system]
 startup_mode = "automatic"  # real BIOS/firmware/card path, no menu navigation
 
-# [cartridge]
-# save_type / save_size: UNKNOWN. Determine from melonDS's game database or
-# observed AUXSPI traffic before enabling; do not rely on the 8 KiB default.
+[cartridge]
+# melonDS 1.1 game database, entry YLZE / 128 MiB: save type 2, the same code
+# SM64DS carries (8 KiB EEPROM). Declared explicitly rather than inherited from
+# the runner's historical default.
+save_type = "eeprom"
+save_size = 8192

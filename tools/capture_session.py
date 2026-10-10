@@ -25,13 +25,16 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--runner", required=True); ap.add_argument("--rom", required=True)
 ap.add_argument("--work", required=True); ap.add_argument("--out", required=True)
 ap.add_argument("--script", required=True); ap.add_argument("--port", type=int, default=19842)
-ap.add_argument("--extra", nargs="*", default=[])
+ap.add_argument("--extra", default="", help='extra runner args as ONE quoted string, e.g. --extra "--save-path X --config Y"')
 a = ap.parse_args()
+import shlex
+a.extra = shlex.split(a.extra)
 Path(a.work).mkdir(parents=True, exist_ok=True); Path(a.out).mkdir(parents=True, exist_ok=True)
 script = json.loads(a.script) if a.script.lstrip().startswith("[") else json.loads(Path(a.script).read_text())
 p = subprocess.Popen([a.runner, ".", "--serve", "--port", str(a.port), "--freebios",
-                      "--generated-firmware", "--boot", "direct", "--rom", a.rom, "--no-save",
-                      "--diagnostics", "off", *a.extra], cwd=a.work,
+                      "--generated-firmware", "--boot", "direct", "--rom", a.rom,
+                      *([] if "--save-path" in a.extra else ["--no-save"]),
+                      "--diagnostics", "off", "--no-coverage-manifest", *a.extra], cwd=a.work,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
     for _ in range(200):
@@ -75,6 +78,8 @@ try:
         elif "tier3" in it:
             r = call(cmd="tier3_coverage", max=it.get("max", 4000))
             Path(it["tier3"]).write_text(json.dumps(r)); print("tier3 entries", len(r.get("entries", [])))
+        elif "saveflush" in it:
+            print("cart_save_flush", call(cmd="cart_save_flush"))
         elif "cov" in it:
             print("static_coverage", json.dumps(call(cmd="static_coverage"))[:600])
 finally:

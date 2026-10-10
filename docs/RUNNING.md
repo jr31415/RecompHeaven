@@ -27,6 +27,15 @@ Then slot 1 `{"touch":[64,96]}`, label Me `[170,30]`, Yes `[50,45]`.
 Run it with `scripts/play.sh [script.json] [outdir]` (defaults: play1.json -> /tmp/rh-frames).
 Full 3,840-VBlank play script: `scripts/play1.json` (edit the manifest path inside).
 
+## 2b. Play in a window
+`scripts/play_window.sh [rotation]` (default 270). Saves go to
+`~/Library/Application Support/RhythmHeavenRecomp/rhythmheaven.sav` (8 KiB EEPROM,
+raw, melonDS-compatible). Every session also writes
+`~/dev/rh-build/play/frame_times-<stamp>.csv` (per-frame timing) and a Tier-3 coverage
+manifest to `~/dev/rh-build/coverage/` (feed it to ingest to close coverage gaps).
+`python3 tools/analyze_frames.py <csv>` explains slow frames.
+Env: `NDS_AUDIO_QUEUE_FRAMES` (256..4096, default 1024), `NDS_VSYNC=0`.
+
 ## 3. Live debug over TCP (any time, any ring)
 ```
 nds_runner . --serve --port 19842 --freebios --generated-firmware --boot direct --rom "$ROM" --no-save
