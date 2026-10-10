@@ -100,6 +100,12 @@ def main():
         if not src.exists():
             run(["git", "clone", "-q", "--depth", "1", "--branch", SDL_TAG,
                  "https://github.com/libsdl-org/SDL", src])
+        # iPadOS: Apple Pencil strokes without force sensing (USB-C pencil) were
+        # dropped as "stale hover"; patches/sdl-uikit-pencil.patch fixes that.
+        pp = REPO / "patches/sdl-uikit-pencil.patch"
+        if subprocess.run(["git", "-C", src, "apply", "-R", "--check", pp],
+                          capture_output=True).returncode != 0:
+            run(["git", "-C", src, "apply", pp])
         sdl_b, sdl_i = work / f"sdl-{a.target}", work / f"sdl-{a.target}-install"
         if not (sdl_i / "lib/cmake/SDL3").exists():
             run(["cmake", "-G", "Ninja", "-S", src, "-B", sdl_b, *plat, "-DCMAKE_BUILD_TYPE=Release",

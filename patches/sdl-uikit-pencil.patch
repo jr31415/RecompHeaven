@@ -1,0 +1,42 @@
+diff --git a/src/video/uikit/SDL_uikitpen.m b/src/video/uikit/SDL_uikitpen.m
+index e66dbc5..8311a73 100644
+--- a/src/video/uikit/SDL_uikitpen.m
++++ b/src/video/uikit/SDL_uikitpen.m
+@@ -93,7 +93,7 @@ static SDL_PenID UIKit_AddPenIfNecesary(SDL_Window *window)
+ }
+ 
+ static void UIKit_HandlePenAxes(SDL_Window *window, NSTimeInterval nstimestamp, float zOffset, const CGPoint *point, float force,
+-                                float maximumPossibleForce, float azimuthAngleInView, float altitudeAngle, float rollAngle)
++                                float maximumPossibleForce, float azimuthAngleInView, float altitudeAngle, float rollAngle, bool touching)
+ {
+     const SDL_PenID penId = UIKit_AddPenIfNecesary(window);
+     if (penId) {
+@@ -124,7 +124,9 @@ static void UIKit_HandlePenAxes(SDL_Window *window, NSTimeInterval nstimestamp,
+         // rotation is in radians, and only available on a later iOS.
+         const float rotation = rollAngle * radians_to_degrees;  // !!! FIXME: this might need adjustment, I don't have a pencil that supports it.
+ 
+-        if (force == 0.0f && (SDL_GetPenStatus(penId, NULL, 0) & SDL_PEN_INPUT_DOWN)) {
++        // Only hover updates can be stale at release. A touching pencil without force sensing
++        // (Apple Pencil USB-C) reports force 0 for the whole stroke; dropping those killed drags.
++        if (!touching && force == 0.0f && (SDL_GetPenStatus(penId, NULL, 0) & SDL_PEN_INPUT_DOWN)) {
+             // The first hover as the pen is being released has a stale position, so ignore it
+             return;
+         }
+@@ -166,7 +168,7 @@ void UIKit_HandlePenHover(SDL_uikitview *view, UIHoverGestureRecognizer *recogni
+ 
+     // force is zero here; if you're here, you're not touching.
+     // !!! FIXME: no timestamp on these...?
+-    UIKit_HandlePenAxes(window, 0, zOffset, &point, 0.0f, 1.0f, azimuthAngleInView, altitudeAngle, rollAngle);
++    UIKit_HandlePenAxes(window, 0, zOffset, &point, 0.0f, 1.0f, azimuthAngleInView, altitudeAngle, rollAngle, false);
+ }
+ #endif
+ 
+@@ -183,7 +185,7 @@ static void UIKit_HandlePenAxesFromUITouch(SDL_uikitview *view, UITouch *pencil)
+     const CGPoint point = [pencil locationInView:view];
+ 
+     // zOffset is zero here; if you're here, you're touching.
+-    UIKit_HandlePenAxes(window, [pencil timestamp], 0.0f, &point, [pencil force], [pencil maximumPossibleForce], [pencil azimuthAngleInView:view], [pencil altitudeAngle], rollAngle);
++    UIKit_HandlePenAxes(window, [pencil timestamp], 0.0f, &point, [pencil force], [pencil maximumPossibleForce], [pencil azimuthAngleInView:view], [pencil altitudeAngle], rollAngle, true);
+ }
+ 
+ void UIKit_HandlePenMotion(SDL_uikitview *view, UITouch *pencil)
