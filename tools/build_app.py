@@ -21,7 +21,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 SHA1 = "601b92b1603f1822543e264df55ab4152ded356c"
-SDL_TAG = "release-3.4.8"
+SDL_TAG = "release-3.4.18"
 
 
 def run(cmd, **kw):

@@ -1,0 +1,54 @@
+From ec7b6410e37c83863fa11f99cad1f41df2922993 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Sat, 10 Oct 2026 15:20:15 -0700
+Subject: [PATCH 13/13] iOS: define SDL_MAIN_HANDLED in the launcher
+ (UIApplicationMain was entered twice), UIScene manifest
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runner/ios/Info.plist.in | 14 ++++++++++++++
+ runner/src/ios_launch.mm |  3 +++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/runner/ios/Info.plist.in b/runner/ios/Info.plist.in
+index ac436af..f5804b1 100644
+--- a/runner/ios/Info.plist.in
++++ b/runner/ios/Info.plist.in
+@@ -21,6 +21,20 @@
+   <key>UIViewControllerBasedStatusBarAppearance</key><false/>
+   <key>UIApplicationSupportsIndirectInputEvents</key><true/>
+   <key>UILaunchScreen</key><dict/>
++  <key>UIApplicationSceneManifest</key>
++  <dict>
++    <key>UIApplicationSupportsMultipleScenes</key><false/>
++    <key>UISceneConfigurations</key>
++    <dict>
++      <key>UIWindowSceneSessionRoleApplication</key>
++      <array>
++        <dict>
++          <key>UISceneConfigurationName</key><string>SDLSceneConfiguration</string>
++          <key>UISceneDelegateClassName</key><string>SDLUIKitSceneDelegate</string>
++        </dict>
++      </array>
++    </dict>
++  </dict>
+   <key>UISupportedInterfaceOrientations</key>
+   <array>
+     <string>UIInterfaceOrientationPortrait</string>
+diff --git a/runner/src/ios_launch.mm b/runner/src/ios_launch.mm
+index cfc33df..74cfccf 100644
+--- a/runner/src/ios_launch.mm
++++ b/runner/src/ios_launch.mm
+@@ -11,6 +11,9 @@
+ 
+ #if TARGET_OS_IOS
+ 
++// We provide main() ourselves: without this SDL_main.h renames it to SDL_main and
++// supplies its own main(), which re-enters SDL_RunApp (UIApplicationMain twice).
++#define SDL_MAIN_HANDLED
+ #include <SDL3/SDL.h>
+ #include <SDL3/SDL_main.h>
+ 
+-- 
+2.54.0 (Apple Git-157)
+
