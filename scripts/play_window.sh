@@ -6,6 +6,9 @@
 #       Backspace=Select  Esc=settings  (hold Tab = virtual stylus)
 # Tuning (env): NDS_AUDIO_QUEUE_FRAMES=512..4096 (default 1024 ~ 31 ms)
 #               NDS_VSYNC=0 to present immediately (tearing, lowest video lag)
+# Emulation + audio run on a worker thread; the main thread only presents
+# (vsync) so a late frame never starves the audio clock. NDS_THREADED_PRESENT=0
+# goes back to the single-thread loop.
 # Needs the SDL3 build at ~/dev/rh-build/runner-play (see docs/RUNNING.md).
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ROM="${ROM:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/ndsrecomp/3588 - Rhythm Heaven (US)(XenoPhobia).nds}"
@@ -15,6 +18,7 @@ SAVEDIR="$HOME/Library/Application Support/RhythmHeavenRecomp"
 mkdir -p "$SAVEDIR" "$HOME/dev/rh-build/play" "$HOME/dev/rh-build/coverage"
 cd "$HOME/dev/rh-build/play"
 STAMP="$(date +%Y%m%d-%H%M%S)"
+export NDS_THREADED_PRESENT="${NDS_THREADED_PRESENT:-1}"
 export NDS_FRAME_LOG="$HOME/dev/rh-build/play/frame_times-$STAMP.csv"
 exec "$RUNNER" . --interactive --freebios --generated-firmware --boot direct \
   --rom "$ROM" --config "$HERE/game.toml" \
