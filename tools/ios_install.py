@@ -35,7 +35,7 @@ def main():
     ap.add_argument("--team", required=True, help="Apple team id (certificate OU)")
     ap.add_argument("--udid", required=True, help="device UDID as shown by xcodebuild -showdestinations")
     ap.add_argument("--coredevice-id", help="devicectl identifier (defaults to --udid)")
-    ap.add_argument("--rom", required=True)
+    ap.add_argument("--rom", help="copied to Documents/game.nds when given")
     ap.add_argument("--save", help="raw 8 KiB EEPROM save to install as game.sav")
     ap.add_argument("--identity", default="Apple Development")
     a = ap.parse_args()

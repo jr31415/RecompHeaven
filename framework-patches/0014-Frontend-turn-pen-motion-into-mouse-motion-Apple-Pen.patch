@@ -1,0 +1,62 @@
+From b27016704f139ec054b5f1f012e5b7567f7e01fc Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Sat, 10 Oct 2026 15:28:23 -0700
+Subject: [PATCH] Frontend: turn pen motion into mouse motion (Apple Pencil
+ drags)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runner/src/frontend.cpp | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index 5d67483..782ee2b 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -2039,6 +2039,27 @@ void unrotate_mouse_event(SDL_Event& event,
+     }
+ }
+ 
++// Apple Pencil / pens: SDL reports pen motion as SDL_EVENT_PEN_MOTION and only
++// emulates mouse motion under conditions that did not hold on iPadOS (taps
++// arrived, drags did not). Re-express pen motion as a mouse motion with the
++// left button state so the existing stylus path sees a drag.
++void pen_motion_to_mouse(SDL_Event& event) {
++#if defined(NDS_HAVE_SDL3)
++    if (event.type != SDL_EVENT_PEN_MOTION) return;
++    const SDL_PenMotionEvent pm = event.pmotion;
++    SDL_zero(event);
++    event.motion.type = SDL_EVENT_MOUSE_MOTION;
++    event.motion.timestamp = pm.timestamp;
++    event.motion.windowID = pm.windowID;
++    event.motion.which = SDL_PEN_MOUSEID;
++    event.motion.state = (pm.pen_state & SDL_PEN_INPUT_DOWN) ? SDL_BUTTON_LMASK : 0;
++    event.motion.x = pm.x;
++    event.motion.y = pm.y;
++#else
++    (void)event;
++#endif
++}
++
+ void convert_mouse_event_to_logical_coordinates(
+     SDL_Event& event, const FrontendPresentation& presentation) {
+ #if defined(NDS_HAVE_SDL3)
+@@ -3755,6 +3776,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                 }
+             }
+             if (!threaded) {
++                pen_motion_to_mouse(event);
+                 convert_mouse_event_to_logical_coordinates(event, presentation);
+                 unrotate_mouse_event(event, presentation);
+             }
+@@ -5109,6 +5131,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             }
+         };
+         auto queue_pending_events = [&](SDL_Event& e) {
++            pen_motion_to_mouse(e);
+             convert_mouse_event_to_logical_coordinates(e, presentation);
+             unrotate_mouse_event(e, presentation);
+             {
+-- 
+2.54.0 (Apple Git-157)
+
