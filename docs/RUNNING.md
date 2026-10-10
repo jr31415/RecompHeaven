@@ -24,6 +24,7 @@ down/up, swipe, keys, shot, manifest, tier3, cov, digest.
 Flick that advances the title (needs speed):
 `{"down":[110,96],"hold":12},{"down":[130,70],"hold":8},{"down":[150,60],"hold":6},{"down":[252,76],"hold":1},{"up":true,"hold":1}`
 Then slot 1 `{"touch":[64,96]}`, label Me `[170,30]`, Yes `[50,45]`.
+Run it with `scripts/play.sh [script.json] [outdir]` (defaults: play1.json -> /tmp/rh-frames).
 Full 3,840-VBlank play script: `scripts/play1.json` (edit the manifest path inside).
 
 ## 3. Live debug over TCP (any time, any ring)
