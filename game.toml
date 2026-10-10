@@ -5,6 +5,7 @@ sha1 = "601b92b1603f1822543e264df55ab4152ded356c"
 [display]
 screen_layout = "stacked"   # stacked | separate
 screen_rotation = "270"    # book-style grip: top screen on the left
+auto_hand_rotation = true  # follow the game's left/right-handed mode (+180 when left)
 
 [system]
 startup_mode = "automatic"  # real BIOS/firmware/card path, no menu navigation

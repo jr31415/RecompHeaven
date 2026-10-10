@@ -1,0 +1,173 @@
+From 62ac73a989a3e23b22db998165319b5dcd91499c Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Sat, 10 Oct 2026 11:36:33 -0700
+Subject: [PATCH 8/8] Frontend: follow the game's left/right-handed mode with a
+ 180-degree host rotation
+
+[display] auto_hand_rotation (or NDS_AUTO_HAND_ROTATION=1) watches OAM: in
+Rhythm Heaven's left-handed mode ~80% of sprites on the active engine have
+the vertical-flip bit set versus ~3% in right-handed mode. Six agreeing
+frames flip presentation.rotation by 180 degrees (and back), so the picture
+stays upright in either grip; stylus mapping follows because it reads the
+live rotation. Per-engine ratios avoid dilution by parked sprites.
+NDS_HAND_DEBUG=1 logs the raw counts.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runner/src/frontend.cpp        | 86 ++++++++++++++++++++++++++++++++++
+ runner/src/frontend.h          |  5 ++
+ runner/src/frontend_config.cpp |  4 ++
+ 3 files changed, 95 insertions(+)
+
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index 1931a5e..1350726 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -38,6 +38,7 @@
+ #include "savestate_slots.h"
+ #include "spu.h"
+ #include "tier3.h"
++#include "vram.h"
+ #include "title_patches.h"
+ #if defined(NDS_HAVE_COMPUTE_RENDERER)
+ #include "melonds_compute/ComputeHost.h"
+@@ -1685,6 +1686,47 @@ SDL_Rect rotated_draw_rect(int rotation, int screen) {
+                     kScreenWidth, kScreenHeight};
+ }
+ 
++// Left/right-handed detection for titles that flip their whole picture 180
++// degrees in left-handed mode by setting the vertical-flip bit on essentially
++// every sprite. Returns 1 (left-handed), 0 (right-handed) or -1 (not enough
++// evidence this frame). Unused OAM slots (all-zero), disabled and affine
++// sprites are ignored; the verdict is the share of remaining sprites with
++// attr1 bit 13 set. Measured on Rhythm Heaven's bottom screen: ~3-4% in
++// right-handed mode, ~80% in left-handed mode.
++int detect_left_handed_from_oam(int* used_out = nullptr,
++                                int* flipped_out = nullptr) {
++    // Judged per engine: one engine routinely holds a full table of parked,
++    // never-flipped sprites that would otherwise dilute the other's ratio.
++    int best_used = 0;
++    int best_flipped = 0;
++    int verdict = -1;
++    for (int engine = 0; engine < 2; ++engine) {
++        const uint8_t* oam = nds_vram_renderer_oam(engine);
++        if (!oam) continue;
++        int used = 0;
++        int flipped = 0;
++        for (int i = 0; i < 128; ++i) {
++            const uint8_t* e = oam + i * 8;
++            const uint16_t a0 = static_cast<uint16_t>(e[0] | (e[1] << 8));
++            const uint16_t a1 = static_cast<uint16_t>(e[2] | (e[3] << 8));
++            const uint16_t a2 = static_cast<uint16_t>(e[4] | (e[5] << 8));
++            if (!a0 && !a1 && !a2) continue;
++            const int mode = (a0 >> 8) & 3;
++            if (mode == 2 || (mode & 1)) continue;  // disabled / affine
++            ++used;
++            flipped += (a1 >> 13) & 1;
++        }
++        if (used < 8) continue;
++        if (flipped * 2 >= used) verdict = 1;
++        else if (verdict < 0) verdict = 0;
++        if (flipped > best_flipped) { best_flipped = flipped; best_used = used; }
++        else if (best_used == 0) best_used = used;
++    }
++    if (used_out) *used_out = best_used;
++    if (flipped_out) *flipped_out = best_flipped;
++    return verdict;
++}
++
+ // Inverse mapping: a point in the rotated logical canvas -> the equivalent
+ // point in the unrotated stacked canvas, so all touch routing downstream is
+ // unchanged. Points outside both footprints map far outside the canvas.
+@@ -2471,6 +2513,24 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     // At or below that the loop is not keeping up and the synthetic present is
+     // skipped for that frame. Nothing in this path ever sleeps or busy-loops.
+     const uint32_t audio_queue_target = audio_queue_target_frames();
++    bool auto_hand_rotation = options.auto_hand_rotation;
++    if (const char* env = std::getenv("NDS_AUTO_HAND_ROTATION"))
++        auto_hand_rotation = env[0] == '1';
++    // The 180-degree host flip only exists for the stacked layout at native
++    // width, the same constraint as screen_rotation itself.
++    if (auto_hand_rotation &&
++        (presentation.separate ||
++         presentation.screen_widths[0] != kScreenWidth ||
++         presentation.screen_widths[1] != kScreenWidth)) {
++        std::fprintf(stderr,
++                     "[sdl] auto hand rotation needs the stacked layout at "
++                     "native width; disabled\n");
++        auto_hand_rotation = false;
++    }
++    const int base_rotation = options.screen_rotation;
++    bool hand_left = false;
++    int hand_candidate = 0;
++    int hand_agree = 0;
+     std::fprintf(stderr, "[sdl] audio queue target=%u frames (~%.1f ms)\n",
+                  audio_queue_target, audio_queue_target * 1000.0 / 32768.0);
+     constexpr uint32_t kRecordRing = 1u << 16;
+@@ -4198,6 +4258,32 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             touch_release_pending = false;
+         }
+ 
++        if (auto_hand_rotation) {
++            int hand_used = 0, hand_flipped = 0;
++            const int verdict =
++                detect_left_handed_from_oam(&hand_used, &hand_flipped);
++            if (std::getenv("NDS_HAND_DEBUG") && (shown_frames % 120) == 0)
++                std::fprintf(stderr, "[hand] f%llu used=%d flipped=%d verdict=%d\n",
++                             static_cast<unsigned long long>(shown_frames),
++                             hand_used, hand_flipped, verdict);
++            if (verdict >= 0) {
++                if (verdict == hand_candidate) ++hand_agree;
++                else { hand_candidate = verdict; hand_agree = 1; }
++                // Six agreeing frames (~100 ms) so a scene transition never
++                // flips the window; a real mode change is sticky.
++                if (hand_agree >= 6 && (verdict == 1) != hand_left) {
++                    hand_left = verdict == 1;
++                    const int effective =
++                        (base_rotation + (hand_left ? 180 : 0)) % 360;
++                    std::fprintf(stderr,
++                                 "[sdl] %s-handed mode detected; rotation %d\n",
++                                 hand_left ? "left" : "right", effective);
++                    run_on_main([&presentation, effective]() {
++                        presentation.rotation = effective;
++                    }, false);
++                }
++            }
++        }
+         // Latency: this frame's audio goes to the device NOW, before the
+         // present, which may block on vsync for up to a display period. Audio
+         // is the pacing clock and must never wait behind a delayed frame.
+diff --git a/runner/src/frontend.h b/runner/src/frontend.h
+index d807152..da56f41 100644
+--- a/runner/src/frontend.h
++++ b/runner/src/frontend.h
+@@ -198,6 +198,11 @@ struct NdsFrontendOptions {
+     // widths); stylus input is mapped back through the inverse. Games that
+     // are played book-style (Rhythm Heaven) want 270.
+     int screen_rotation = 0;
++    // Titles with a left-handed mode that flips the whole picture 180 degrees
++    // (Rhythm Heaven DS) set this: the frontend watches the sprite vertical-flip
++    // bits in OAM and adds 180 degrees to screen_rotation while left-handed
++    // mode is active, and removes it when right-handed mode returns.
++    bool auto_hand_rotation = false;
+     NdsFullscreenMode fullscreen = NdsFullscreenMode::Off;
+     NdsStartupMode startup_mode = NdsStartupMode::Preserve;
+     NdsBootMode boot_mode = NdsBootMode::Lle;
+diff --git a/runner/src/frontend_config.cpp b/runner/src/frontend_config.cpp
+index 61d7278..67d4d50 100644
+--- a/runner/src/frontend_config.cpp
++++ b/runner/src/frontend_config.cpp
+@@ -633,6 +633,10 @@ bool nds_load_frontend_config(const std::string& path,
+             if (options->adaptive_supported & NDS_ADAPTIVE_BOTTOM)
+                 options->adaptive_max_width[1] = 448;
+         }
++        if (const auto value =
++                (*display)["auto_hand_rotation"].value<bool>()) {
++            options->auto_hand_rotation = *value;
++        }
+         if (const auto value =
+                 (*display)["adaptive_skybox_fill"].value<bool>()) {
+             options->adaptive_skybox_fill = *value;
+-- 
+2.54.0 (Apple Git-157)
+
