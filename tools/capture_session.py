@@ -24,13 +24,22 @@ def png(path, w, h, rgb):
 ap = argparse.ArgumentParser()
 ap.add_argument("--runner", required=True); ap.add_argument("--rom", required=True)
 ap.add_argument("--work", required=True); ap.add_argument("--out", required=True)
-ap.add_argument("--script", required=True); ap.add_argument("--port", type=int, default=19842)
+ap.add_argument("--script", required=True)
+ap.add_argument("--port", type=int, default=0, help="0 = pick a free port (default)")
 ap.add_argument("--extra", default="", help='extra runner args as ONE quoted string, e.g. --extra "--save-path X --config Y"')
 a = ap.parse_args()
 import shlex
 a.extra = shlex.split(a.extra)
 Path(a.work).mkdir(parents=True, exist_ok=True); Path(a.out).mkdir(parents=True, exist_ok=True)
 script = json.loads(a.script) if a.script.lstrip().startswith("[") else json.loads(Path(a.script).read_text())
+import socket as _s
+if a.port == 0:
+    with _s.socket() as _t:
+        _t.bind(("127.0.0.1", 0)); a.port = _t.getsockname()[1]
+else:
+    with _s.socket() as _t:
+        if _t.connect_ex(("127.0.0.1", a.port)) == 0:
+            raise SystemExit(f"port {a.port} already has a listener (a running game?); refusing to drive it")
 p = subprocess.Popen([a.runner, ".", "--serve", "--port", str(a.port), "--freebios",
                       "--generated-firmware", "--boot", "direct", "--rom", a.rom,
                       *([] if "--save-path" in a.extra else ["--no-save"]),
@@ -41,6 +50,8 @@ try:
         try: sk = socket.create_connection(("127.0.0.1", a.port)); break
         except OSError: time.sleep(0.1)
     f = sk.makefile("rw", newline="\n")
+    if p.poll() is not None:
+        raise SystemExit("runner exited before the session started")
     def call(**r):
         f.write(json.dumps(r) + "\n"); f.flush(); return json.loads(f.readline())
     vb = 0
@@ -78,6 +89,17 @@ try:
         elif "tier3" in it:
             r = call(cmd="tier3_coverage", max=it.get("max", 4000))
             Path(it["tier3"]).write_text(json.dumps(r)); print("tier3 entries", len(r.get("entries", [])))
+        elif "readmem" in it:
+            addr, ln = it["readmem"]
+            r = call(cmd="read_mem", cpu=9, addr=addr, len=ln)
+            print("readmem", hex(addr), r.get("hex"))
+        elif "writemem" in it:
+            addr, hx = it["writemem"]
+            print("writemem", hex(addr), call(cmd="write_mem", cpu=9, addr=addr, hex=hx))
+        elif "dumpsave" in it:
+            r = call(cmd="cart_save")
+            Path(it["dumpsave"]).write_bytes(bytes.fromhex(r["hex"]))
+            print("dumpsave", r.get("size"), "dirty", r.get("dirty"))
         elif "saveflush" in it:
             print("cart_save_flush", call(cmd="cart_save_flush"))
         elif "cov" in it:
