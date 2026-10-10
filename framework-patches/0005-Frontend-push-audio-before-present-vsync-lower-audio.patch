@@ -1,7 +1,7 @@
 From 1fd60dc453f4cd03b6635a8878a983b03316ff65 Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Fri, 9 Oct 2026 22:13:22 -0700
-Subject: [PATCH 5/6] Frontend: push audio before present, vsync, lower audio
+Subject: [PATCH 5/7] Frontend: push audio before present, vsync, lower audio
  queue, frame-time ring
 
 - push_audio/throttle_audio split: a frame's audio reaches the device before

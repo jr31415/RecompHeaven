@@ -1,0 +1,106 @@
+From a95983b4a21220ce4951bd345dfe5a000a70dd39 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Sat, 10 Oct 2026 10:51:51 -0700
+Subject: [PATCH 7/7] Frontend: Space bar taps the touchscreen at the last
+ cursor position
+
+Lets one hand aim with the mouse while the other taps with lower latency
+than a click. Cursor position is tracked from every pointer event in the
+bottom window; Space reuses the click path (same minimum pen-down hold) and
+drag-while-held still follows the mouse. Space is no longer a Start alias
+(Enter and P remain).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runner/src/frontend.cpp | 54 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index 2ce4c0f..1931a5e 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -958,7 +958,6 @@ uint16_t key_bit(SDL_Scancode key) {
+         case SDL_SCANCODE_X:         return 1u << 1;  // B
+         case SDL_SCANCODE_BACKSPACE: return 1u << 2;  // Select
+         case SDL_SCANCODE_RETURN:    return 1u << 3;  // Start
+-        case SDL_SCANCODE_SPACE:     return 1u << 3;  // Start (alias)
+         case SDL_SCANCODE_P:         return 1u << 3;  // Start (alias, pause)
+         case SDL_SCANCODE_RIGHT:     return 1u << 4;
+         case SDL_SCANCODE_LEFT:      return 1u << 5;
+@@ -2539,7 +2538,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     std::fprintf(stderr,
+         "[sdl] controls: gamepad=Player 1 | bottom mouse=touch | "
+         "arrows=D-pad | Z=A X=B | A=Y S=X | Q=L W=R | "
+-        "Enter/Space/P=Start Backspace=Select | Esc=settings%s\n",
++        "Enter/P=Start Backspace=Select Space=tap at cursor | "
++        "Esc=settings%s\n",
+         options.tab_turbo ? " | hold Tab=turbo" : "");
+     if (options.relative_mouse_touch) {
+         std::fprintf(stderr,
+@@ -2673,6 +2673,13 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     }
+     bool compute_failed = false;
+     bool mouse_down = false;
++    // Space bar taps the touchscreen at the last known cursor position, so one
++    // hand can aim with the mouse while the other taps with lower latency than
++    // a click. cursor_* follows every pointer motion in the bottom window.
++    bool space_tap_down = false;
++    bool cursor_valid = false;
++    float cursor_x = 0.0f;
++    float cursor_y = 0.0f;
+     bool touch_release_pending = false;
+     uint32_t touch_frames_held = 0;
+     int64_t relative_delta_x = 0;
+@@ -3746,6 +3753,49 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                 set_touch_from_mouse(event.motion.x, event.motion.y, true,
+                                      options.screen_layout,
+                                      bottom_logical_width);
++            if ((event.type == SDL_MOUSEMOTION ||
++                 event.type == SDL_MOUSEBUTTONDOWN ||
++                 event.type == SDL_MOUSEBUTTONUP) &&
++                (event.type == SDL_MOUSEMOTION
++                     ? event.motion.windowID : event.button.windowID) ==
++                    presentation.window_ids[1]) {
++                cursor_x = static_cast<float>(
++                    event.type == SDL_MOUSEMOTION ? event.motion.x
++                                                  : event.button.x);
++                cursor_y = static_cast<float>(
++                    event.type == SDL_MOUSEMOTION ? event.motion.y
++                                                  : event.button.y);
++                cursor_valid = true;
++            }
++            if (event.type == SDL_KEYDOWN && !event.key.repeat &&
++                sdl_event_scancode(event) == SDL_SCANCODE_SPACE &&
++                cursor_valid && !space_tap_down && !mouse_down &&
++                !runtime_menu_open()) {
++                space_tap_down = true;
++                mouse_down = true;
++                ++host_touch_presses;
++                last_touch_event_x = static_cast<int>(cursor_x);
++                last_touch_event_y = static_cast<int>(cursor_y);
++                touch_release_pending = false;
++                touch_frames_held = 0;
++                set_touch_from_mouse(cursor_x, cursor_y, true,
++                                     options.screen_layout,
++                                     bottom_logical_width);
++            }
++            if (event.type == SDL_KEYUP && !event.key.repeat &&
++                sdl_event_scancode(event) == SDL_SCANCODE_SPACE &&
++                space_tap_down) {
++                space_tap_down = false;
++                mouse_down = false;
++                // Same minimum hold as a click: the ARM7 must see at least a
++                // couple of frames of pen-down.
++                if (touch_frames_held < 2)
++                    touch_release_pending = true;
++                else
++                    set_touch_from_mouse(cursor_x, cursor_y, false,
++                                         options.screen_layout,
++                                         bottom_logical_width);
++            }
+             if (event.type == SDL_MOUSEMOTION &&
+                 virtual_stylus_active() &&
+                 (event.motion.windowID == presentation.window_ids[0] ||
+-- 
+2.54.0 (Apple Git-157)
+

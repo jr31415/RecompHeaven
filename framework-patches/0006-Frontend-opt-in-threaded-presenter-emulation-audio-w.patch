@@ -1,7 +1,7 @@
 From be1a81b2ba1f4195c4cd30f737d3c839114e54f2 Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Fri, 9 Oct 2026 22:23:46 -0700
-Subject: [PATCH 6/6] Frontend: opt-in threaded presenter (emulation+audio
+Subject: [PATCH 6/7] Frontend: opt-in threaded presenter (emulation+audio
  worker, vsync on main)
 
 NDS_THREADED_PRESENT=1 runs the unchanged emulation loop on a worker thread

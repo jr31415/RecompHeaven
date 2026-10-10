@@ -2,8 +2,10 @@
 # Play Rhythm Heaven in a window. Mouse on the bottom screen = stylus.
 # Usage: scripts/play_window.sh [rotation: 0|90|180|270, default 270]
 #
-# Keys: arrows=D-pad  Z=A  X=B  A=Y  S=X  Q=L  W=R  Enter/Space/P=Start
+# Keys: arrows=D-pad  Z=A  X=B  A=Y  S=X  Q=L  W=R  Enter/P=Start
 #       Backspace=Select  Esc=settings  (hold Tab = virtual stylus)
+#       Space = tap the touchscreen at the mouse cursor (aim with the mouse,
+#               tap with the spacebar; drag by moving the mouse while held)
 # Tuning (env): NDS_AUDIO_QUEUE_FRAMES=512..4096 (default 1024 ~ 31 ms)
 #               NDS_VSYNC=0 to present immediately (tearing, lowest video lag)
 # Emulation + audio run on a worker thread; the main thread only presents
