@@ -122,3 +122,49 @@ def sheet(frames, path, cols=4, labels=None):
                 dst = ((oy + k * h + y) * W + ox) * 3
                 buf[dst:dst + len(src)] = src
     png(path, W, H, bytes(buf))
+
+
+def find_tiles(w, h, rgb):
+    """Tile centres on the game-select map: 34x34 frames with a fff700 left border."""
+    Y = b"\xff\xf7\x00"
+    def px(x, y): return rgb[(y * w + x) * 3:(y * w + x) * 3 + 3]
+    out = []
+    for x in range(1, w - 36):
+        y = 0
+        while y < h:
+            if px(x, y) == Y and px(x - 1, y) == b"\x00\x00\x00":
+                y0 = y
+                while y < h and px(x, y) == Y: y += 1
+                if 24 <= y - y0 <= 40:
+                    out.append((x, y0, y - y0))
+            else:
+                y += 1
+    # collapse duplicates (adjacent x for double-wide border)
+    tiles = []
+    for x, y0, n in out:
+        if not any(abs(x - tx) <= 3 and abs(y0 - ty) <= 3 for tx, ty, _ in tiles):
+            tiles.append((x, y0, n))
+    return [(x + 17, y0 + n // 2) for x, y0, n in sorted(tiles, key=lambda t: (t[1], t[0]))]
+
+
+def tile_hash(w, h, rgb, cx, cy):
+    """Hash of the tile's inner picture (ignores the PERFECT/rank ribbon at the edges)."""
+    x0, y0 = max(0, cx - 12), max(0, cy - 12)
+    data = b"".join(rgb[((y0 + j) * w + x0) * 3:((y0 + j) * w + min(w, x0 + 24)) * 3] for j in range(24) if y0 + j < h)
+    return hashlib.sha1(data).hexdigest()[:10]
+
+
+def boot_to_map(s):
+    """Boot with the (left-handed) 100% save to the game-select map, no savestates."""
+    s.run_to(600); s.touch(14, 14, 6)          # "Change to right-handed?" prompt button
+    s.run_to(800); s.touch(150, 45, 6)         # No
+    s.run_to(1000)
+    s.down(128, 96, 6); s.down(100, 96, 2); s.down(60, 96, 2); s.down(10, 96, 1); s.up(1)  # start flick
+    s.run_to(1250); s.touch(60, 96, 6)         # file slot 1
+    s.run_to(1550); s.touch(128, 96, 6)        # START
+    s.run(360)
+
+
+def pan(s, hx, hy, dx, dy):
+    x1 = max(8, min(247, hx + dx)); y1 = max(8, min(184, hy + dy))
+    s.flick(hx, hy, x1, y1, 22); s.run(80)
