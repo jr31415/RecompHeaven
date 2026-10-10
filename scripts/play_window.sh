@@ -6,7 +6,7 @@
 #       Backspace=Select  Esc=settings  (hold Tab = virtual stylus)
 #       Space = tap the touchscreen at the mouse cursor (aim with the mouse,
 #               tap with the spacebar; drag by moving the mouse while held)
-# Tuning (env): NDS_AUDIO_QUEUE_FRAMES=512..4096 (default 1024 ~ 31 ms)
+# Tuning (env): NDS_AUDIO_QUEUE_FRAMES (min floor, default 192 ~ 6 ms, adaptive)
 #               NDS_VSYNC=0 to present immediately (tearing, lowest video lag)
 # Emulation + audio run on a worker thread; the main thread only presents
 # (vsync) so a late frame never starves the audio clock. NDS_THREADED_PRESENT=0

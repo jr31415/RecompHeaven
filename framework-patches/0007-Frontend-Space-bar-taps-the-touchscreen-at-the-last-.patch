@@ -1,7 +1,7 @@
 From a95983b4a21220ce4951bd345dfe5a000a70dd39 Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Sat, 10 Oct 2026 10:51:51 -0700
-Subject: [PATCH 7/9] Frontend: Space bar taps the touchscreen at the last
+Subject: [PATCH 07/10] Frontend: Space bar taps the touchscreen at the last
  cursor position
 
 Lets one hand aim with the mouse while the other taps with lower latency

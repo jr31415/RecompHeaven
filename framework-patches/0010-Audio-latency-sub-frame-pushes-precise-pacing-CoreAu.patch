@@ -1,0 +1,699 @@
+From 29b3a9f18476ab272a1b184a9a90f62adb0cfe0c Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Sat, 10 Oct 2026 12:23:58 -0700
+Subject: [PATCH 10/10] Audio latency: sub-frame pushes, precise pacing,
+ CoreAudio IO buffer, adaptive floor, probe
+
+- push audio 16x per DS frame; pace with proportional precise sleeps
+  (a fixed SDL_Delay(1) per chunk starves the loop)
+- set kAudioDevicePropertyBufferFrameSize directly (SDL's hint never reached it)
+- default queue floor 192 frames, adaptive +128 per underrun, -16 per clean 5 s
+- NDS_AUDIO_TEST probe: injects a click into the real audio path, timestamps
+  push and device-mix; audio_latency debug command; CoreAudio device report
+
+Measured ~41 ms -> ~11 ms push-to-hardware on wired headphones (idle),
+1 underrun across a 4,600-frame run with scene loads.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ docs/audio_latency.md            |  44 +++++
+ runner/CMakeLists.txt            |   4 +
+ runner/src/audio_device_info.cpp | 128 +++++++++++++++
+ runner/src/audio_device_info.h   |  26 +++
+ runner/src/debug_server.cpp      |   2 +
+ runner/src/frontend.cpp          | 268 +++++++++++++++++++++++++++++--
+ runner/src/frontend.h            |   3 +
+ 7 files changed, 463 insertions(+), 12 deletions(-)
+ create mode 100644 docs/audio_latency.md
+ create mode 100644 runner/src/audio_device_info.cpp
+ create mode 100644 runner/src/audio_device_info.h
+
+diff --git a/docs/audio_latency.md b/docs/audio_latency.md
+new file mode 100644
+index 0000000..3068d25
+--- /dev/null
++++ b/docs/audio_latency.md
+@@ -0,0 +1,44 @@
++# Audio latency (interactive frontend)
++
++Measured with `tools/test_audio_delay.py` (title repo) on macOS arm64, wired
++"External Headphones" at 44.1 kHz. The probe mutes game audio and injects a
++click into the exact path game audio takes, timestamping it at the SDL stream
++push and at SDL's postmix callback (the last point software sees it); the OS
++side (IO buffer + device latency + safety offset + stream latency) is read from
++CoreAudio. It is not an acoustic loopback.
++
++## Where the delay was
++
++| stage | before | now |
++|---|---|---|
++| audio batched once per emulated frame | up to 16.7 ms (not visible to the probe) | 16 pushes/frame, ~1 ms |
++| host queue floor (pacing) | 1024 frames, 31 ms | 192 frames minimum, adaptive |
++| SDL device buffer | 1024 frames | 64 frames |
++| CoreAudio IO buffer | 512 frames (11.6 ms), unaffected by SDL's hint | 64 frames |
++| measured push->mix + OS | **~41 ms** | **~11 ms** (idle), ~15 ms after the floor adapts |
++
++## Findings worth keeping
++
++- SDL's `SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES` does **not** change CoreAudio's IO
++  buffer; `kAudioDevicePropertyBufferFrameSize` has to be set directly
++  (`nds_audio_set_os_buffer_frames`).
++- Per-chunk pacing with a fixed `SDL_Delay(1)` starves the loop (each 1 ms of
++  emulated audio then costs >= 1 ms of wall clock). Pacing sleeps are now
++  proportional to the queue excess with sub-ms precision and are skipped under
++  0.4 ms.
++- Emulation spikes at scene loads (9-15 ms) exceed a very small queue. The floor
++  is therefore adaptive: +128 frames per underrun, -16 frames per 5 s once clean
++  for 10 s, capped at 1024.
++
++## Controls (environment)
++
++| variable | default | meaning |
++|---|---|---|
++| `NDS_AUDIO_QUEUE_FRAMES` | 192 | minimum pacing floor (64..4096, 32.7 kHz frames) |
++| `NDS_AUDIO_ADAPTIVE` | 1 | 0 pins the floor at the minimum |
++| `NDS_AUDIO_CHUNKS` | 16 | audio pushes per DS frame (1 = old behaviour) |
++| `NDS_AUDIO_DEVICE_FRAMES` | 64 | SDL's device buffer hint |
++| `NDS_AUDIO_OS_BUFFER_FRAMES` | 64 | CoreAudio IO buffer (macOS), 0 = leave alone |
++| `NDS_AUDIO_TEST` | 0 | probe mode: mute game, inject clicks |
++
++`audio_latency` over the debug protocol returns the probe report.
+diff --git a/runner/CMakeLists.txt b/runner/CMakeLists.txt
+index fb9cc71..ae0cd76 100644
+--- a/runner/CMakeLists.txt
++++ b/runner/CMakeLists.txt
+@@ -477,6 +477,7 @@ add_executable(nds_runner
+     src/scheduler.cpp
+     src/debug_server.cpp
+     src/frontend_config.cpp
++    src/audio_device_info.cpp
+     src/relative_mouse_touch.cpp
+     "${NDS_RECOMP_UI_ROOT}/src/common/recomp_runtime_ui.c"
+     src/frontend.cpp
+@@ -803,6 +804,9 @@ endif()
+ # main thread size is fixed at link time, so ask for it here.
+ if(APPLE)
+     target_link_options(nds_runner PRIVATE -Wl,-stack_size,0x4000000)
++    # Output-device latency introspection for the audio-latency probe.
++    target_link_libraries(nds_runner PRIVATE "-framework CoreAudio"
++        "-framework CoreFoundation")
+ endif()
+ 
+ find_package(Python3 COMPONENTS Interpreter QUIET)
+diff --git a/runner/src/audio_device_info.cpp b/runner/src/audio_device_info.cpp
+new file mode 100644
+index 0000000..bc5f201
+--- /dev/null
++++ b/runner/src/audio_device_info.cpp
+@@ -0,0 +1,128 @@
++#include "audio_device_info.h"
++
++#include <cstring>
++
++#if defined(__APPLE__)
++#include <CoreAudio/CoreAudio.h>
++
++namespace {
++
++template <typename T>
++bool get_prop(AudioObjectID object, AudioObjectPropertySelector selector,
++              AudioObjectPropertyScope scope, T* value) {
++    AudioObjectPropertyAddress address{selector, scope,
++                                       kAudioObjectPropertyElementMain};
++    UInt32 size = sizeof(T);
++    return AudioObjectGetPropertyData(object, &address, 0, nullptr, &size,
++                                      value) == noErr;
++}
++
++}  // namespace
++
++bool nds_audio_system_info(NdsAudioSystemInfo* out) {
++    if (!out) return false;
++    *out = NdsAudioSystemInfo{};
++    AudioDeviceID device = kAudioObjectUnknown;
++    if (!get_prop(kAudioObjectSystemObject,
++                  kAudioHardwarePropertyDefaultOutputDevice,
++                  kAudioObjectPropertyScopeGlobal, &device) ||
++        device == kAudioObjectUnknown)
++        return false;
++    Float64 rate = 0;
++    UInt32 value = 0;
++    if (get_prop(device, kAudioDevicePropertyNominalSampleRate,
++                 kAudioObjectPropertyScopeGlobal, &rate))
++        out->sample_rate = rate;
++    if (get_prop(device, kAudioDevicePropertyBufferFrameSize,
++                 kAudioObjectPropertyScopeOutput, &value))
++        out->buffer_frames = value;
++    if (get_prop(device, kAudioDevicePropertyLatency,
++                 kAudioObjectPropertyScopeOutput, &value))
++        out->device_latency = value;
++    if (get_prop(device, kAudioDevicePropertySafetyOffset,
++                 kAudioObjectPropertyScopeOutput, &value))
++        out->safety_offset = value;
++    AudioValueRange range{};
++    {
++        AudioObjectPropertyAddress address{
++            kAudioDevicePropertyBufferFrameSizeRange,
++            kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
++        UInt32 size = sizeof(range);
++        if (AudioObjectGetPropertyData(device, &address, 0, nullptr, &size,
++                                       &range) == noErr)
++            out->min_buffer_frames = static_cast<uint32_t>(range.mMinimum);
++    }
++    {
++        AudioObjectPropertyAddress address{
++            kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput,
++            kAudioObjectPropertyElementMain};
++        UInt32 size = 0;
++        if (AudioObjectGetPropertyDataSize(device, &address, 0, nullptr,
++                                           &size) == noErr &&
++            size >= sizeof(AudioStreamID)) {
++            AudioStreamID streams[8];
++            if (size > sizeof(streams)) size = sizeof(streams);
++            if (AudioObjectGetPropertyData(device, &address, 0, nullptr, &size,
++                                           streams) == noErr &&
++                get_prop(streams[0], kAudioStreamPropertyLatency,
++                         kAudioObjectPropertyScopeGlobal, &value))
++                out->stream_latency = value;
++        }
++    }
++    {
++        CFStringRef name = nullptr;
++        AudioObjectPropertyAddress address{
++            kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
++            kAudioObjectPropertyElementMain};
++        UInt32 size = sizeof(name);
++        if (AudioObjectGetPropertyData(device, &address, 0, nullptr, &size,
++                                       &name) == noErr && name) {
++            CFStringGetCString(name, out->name, sizeof(out->name),
++                               kCFStringEncodingUTF8);
++            CFRelease(name);
++        }
++    }
++    out->ok = true;
++    return true;
++}
++bool nds_audio_set_os_buffer_frames(uint32_t frames, uint32_t* applied) {
++    AudioDeviceID device = kAudioObjectUnknown;
++    if (!get_prop(kAudioObjectSystemObject,
++                  kAudioHardwarePropertyDefaultOutputDevice,
++                  kAudioObjectPropertyScopeGlobal, &device) ||
++        device == kAudioObjectUnknown)
++        return false;
++    AudioValueRange range{};
++    {
++        AudioObjectPropertyAddress address{
++            kAudioDevicePropertyBufferFrameSizeRange,
++            kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
++        UInt32 size = sizeof(range);
++        if (AudioObjectGetPropertyData(device, &address, 0, nullptr, &size,
++                                       &range) == noErr) {
++            if (frames < range.mMinimum) frames = static_cast<uint32_t>(range.mMinimum);
++            if (frames > range.mMaximum) frames = static_cast<uint32_t>(range.mMaximum);
++        }
++    }
++    AudioObjectPropertyAddress address{
++        kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal,
++        kAudioObjectPropertyElementMain};
++    const UInt32 value = frames;
++    const OSStatus status = AudioObjectSetPropertyData(
++        device, &address, 0, nullptr, sizeof(value), &value);
++    UInt32 now = 0;
++    if (get_prop(device, kAudioDevicePropertyBufferFrameSize,
++                 kAudioObjectPropertyScopeOutput, &now) && applied)
++        *applied = now;
++    return status == noErr;
++}
++#else
++bool nds_audio_set_os_buffer_frames(uint32_t, uint32_t* applied) {
++    if (applied) *applied = 0;
++    return false;
++}
++bool nds_audio_system_info(NdsAudioSystemInfo* out) {
++    if (out) *out = NdsAudioSystemInfo{};
++    return false;
++}
++#endif
+diff --git a/runner/src/audio_device_info.h b/runner/src/audio_device_info.h
+new file mode 100644
+index 0000000..cf3f428
+--- /dev/null
++++ b/runner/src/audio_device_info.h
+@@ -0,0 +1,26 @@
++#pragma once
++
++#include <cstdint>
++
++// Operating-system view of the default output device, in frames at the
++// device's own sample rate. Used only by the audio-latency probe; nothing in
++// emulation depends on it. ok=false when the platform has no implementation.
++struct NdsAudioSystemInfo {
++    bool ok = false;
++    double sample_rate = 0.0;
++    uint32_t buffer_frames = 0;      // current IO buffer size
++    uint32_t device_latency = 0;     // kAudioDevicePropertyLatency
++    uint32_t safety_offset = 0;      // kAudioDevicePropertySafetyOffset
++    uint32_t stream_latency = 0;     // kAudioStreamPropertyLatency (stream 0)
++    uint32_t min_buffer_frames = 0;  // lowest size the device accepts
++    char name[128] = {0};
++};
++
++bool nds_audio_system_info(NdsAudioSystemInfo* out);
++
++// Ask the default output device for a smaller IO buffer (frames at the device
++// rate, clamped to what it accepts). The OS default (512 frames, ~11.6 ms at
++// 44.1 kHz) is a large share of total output latency. Returns the size the
++// device reports afterwards in *applied. Process-scoped on macOS: the hint
++// ends with the process.
++bool nds_audio_set_os_buffer_frames(uint32_t frames, uint32_t* applied);
+diff --git a/runner/src/debug_server.cpp b/runner/src/debug_server.cpp
+index 4e52327..d6b91b0 100644
+--- a/runner/src/debug_server.cpp
++++ b/runner/src/debug_server.cpp
+@@ -1281,6 +1281,8 @@ std::string handle(const std::string& line) {
+         }
+         return "{\"ok\":" + std::string(ok ? "true" : "false") + "}";
+     }
++    if (cmd == "audio_latency")
++        return nds_frontend_audio_latency_json();
+     if (cmd == "frontend_exit") {
+         const bool requested = nds_frontend_request_exit();
+         return "{\"requested\":" +
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index 7c3c920..6400a24 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -37,6 +37,7 @@
+ #include "scheduler.h"
+ #include "savestate_slots.h"
+ #include "spu.h"
++#include "audio_device_info.h"
+ #include "tier3.h"
+ #include "vram.h"
+ #include "title_patches.h"
+@@ -1053,6 +1054,59 @@ uint32_t audio_queue_count(const NdsAudioDevice& device, AudioQueue& queue) {
+ #endif
+ }
+ 
++#if defined(NDS_HAVE_SDL3)
++// Audio latency probe (NDS_AUDIO_TEST=1). Game audio is muted and a short click
++// is injected into the exact path game audio takes (push_audio -> SDL stream ->
++// device). The click is timestamped when it is handed to the stream and again
++// when it shows up in the device mix (SDL's postmix callback, the last place
++// software sees it before the OS). The remaining OS/hardware latency is read
++// from CoreAudio. Report via the `audio_latency` debug command.
++struct AudioProbeSample {
++    uint64_t push_ns = 0;
++    uint64_t mix_ns = 0;
++    uint32_t queued_frames = 0;
++};
++struct AudioProbe {
++    bool test_mode = false;
++    std::atomic<bool> armed{false};
++    std::atomic<uint64_t> push_ns{0};
++    std::atomic<uint32_t> queued{0};
++    std::mutex mutex;
++    std::vector<AudioProbeSample> samples;
++    uint64_t next_click_ns = 0;
++    int device_frames = 0;
++    int device_freq = 0;
++    int stream_freq = 0;
++    uint32_t queue_target = 0;
++    uint32_t device_frames_hint = 0;
++};
++AudioProbe g_audio_probe;
++
++void SDLCALL audio_postmix_probe(void*, const SDL_AudioSpec* spec,
++                                 float* buffer, int buflen) {
++    if (!g_audio_probe.armed.load(std::memory_order_acquire)) return;
++    const int count = buflen / static_cast<int>(sizeof(float));
++    const int channels = spec && spec->channels > 0 ? spec->channels : 2;
++    int first = -1;
++    for (int i = 0; i < count; ++i) {
++        if (std::fabs(buffer[i]) > 0.25f) { first = i / channels; break; }
++    }
++    if (first < 0) return;
++    const double rate = spec && spec->freq > 0 ? spec->freq : 48000;
++    const uint64_t now = SDL_GetTicksNS();
++    AudioProbeSample s;
++    s.push_ns = g_audio_probe.push_ns.load(std::memory_order_relaxed);
++    // The click sits `first` frames into this buffer.
++    s.mix_ns = now + static_cast<uint64_t>(first / rate * 1e9);
++    s.queued_frames = g_audio_probe.queued.load(std::memory_order_relaxed);
++    {
++        std::lock_guard<std::mutex> lock(g_audio_probe.mutex);
++        g_audio_probe.samples.push_back(s);
++    }
++    g_audio_probe.armed.store(false, std::memory_order_release);
++}
++#endif
++
+ // Hand every SPU block produced so far to the audio device. Split from the
+ // pacing sleep (throttle_audio) so the caller can push a frame's audio the
+ // moment it is emulated, BEFORE a vsync-blocking present, instead of behind it.
+@@ -1064,6 +1118,27 @@ bool push_audio(const NdsAudioDevice& device, AudioQueue& queue,
+     for (;;) {
+         const uint32_t frames = nds_spu_read_output(samples.data(), 1024);
+         if (!frames) break;
++#if defined(NDS_HAVE_SDL3)
++        if (g_audio_probe.test_mode) {
++            // Mute the game; keep the same chunking and pacing as real audio.
++            std::memset(samples.data(), 0, frames * kAudioFrameBytes);
++            const uint64_t now = SDL_GetTicksNS();
++            if (!g_audio_probe.armed.load(std::memory_order_acquire) &&
++                now >= g_audio_probe.next_click_ns && frames >= 32) {
++                for (uint32_t i = 0; i < 32; ++i) {
++                    const int16_t v = ((i / 4) & 1) ? -24000 : 24000;
++                    samples[i * 2] = v;
++                    samples[i * 2 + 1] = v;
++                }
++                g_audio_probe.queued.store(audio_queue_count(device, queue),
++                                           std::memory_order_relaxed);
++                g_audio_probe.push_ns.store(SDL_GetTicksNS(),
++                                            std::memory_order_relaxed);
++                g_audio_probe.armed.store(true, std::memory_order_release);
++                g_audio_probe.next_click_ns = now + 300000000ull;
++            }
++        }
++#endif
+         bool pushed = false;
+         while (!pushed) {
+ #if defined(NDS_HAVE_SDL3)
+@@ -1119,10 +1194,27 @@ uint32_t throttle_audio(const NdsAudioDevice& device, AudioQueue& queue,
+     // down while the emulator is running behind, so a slow stretch spends the
+     // buffered runway instead of having it slept away.
+     uint32_t queued = audio_queue_count(device, queue);
++#if defined(NDS_HAVE_SDL3)
++    // Sleep in proportion to how far above the floor the queue is, with
++    // sub-millisecond precision, and not at all when the excess is under a
++    // fraction of a millisecond. The old fixed SDL_Delay(1) was fine once per
++    // frame but, called per audio chunk, costs >= 1 ms of wall clock for each
++    // ~1 ms of emulated time, so the loop falls behind real time and the queue
++    // starves.
++    while (throttle && queued > pace_floor) {
++        const double excess_ms =
++            static_cast<double>(queued - pace_floor) * 1000.0 /
++            static_cast<double>(kAudioFrequency);
++        if (excess_ms < 0.4) break;
++        SDL_DelayPrecise(static_cast<uint64_t>(excess_ms * 0.8 * 1e6));
++        queued = audio_queue_count(device, queue);
++    }
++#else
+     while (throttle && queued > pace_floor) {
+         SDL_Delay(1);
+         queued = audio_queue_count(device, queue);
+     }
++#endif
+     return queued;
+ }
+ 
+@@ -1135,19 +1227,20 @@ uint32_t drain_audio(const NdsAudioDevice& device, AudioQueue& queue,
+ }
+ 
+ // Steady-state audio queue target in 32768 Hz frames: the pacing floor, and so
+-// the host-side audio latency. The old fixed 2048 (~63 ms) was tuned for crackle
++// the host-side audio latency (minimum; see the adaptive floor in the frontend
++// loop, which raises it after underruns). The old fixed 2048 (~63 ms) was tuned for crackle
+ // safety on a loop that presented before it pushed audio. Rhythm games need the
+ // sound as early as possible; override with NDS_AUDIO_QUEUE_FRAMES (256..4096).
+ uint32_t audio_queue_target_frames() {
+-    uint32_t value = 1024;
++    uint32_t value = 192;
+     if (const char* env = std::getenv("NDS_AUDIO_QUEUE_FRAMES")) {
+         const long parsed = std::strtol(env, nullptr, 10);
+-        if (parsed >= 256 && parsed <= 4096)
++        if (parsed >= 64 && parsed <= 4096)
+             value = static_cast<uint32_t>(parsed);
+         else
+             std::fprintf(stderr,
+                          "[sdl] ignoring NDS_AUDIO_QUEUE_FRAMES=%s "
+-                         "(expected 256..4096)\n", env);
++                         "(expected 64..4096)\n", env);
+     }
+     return value;
+ }
+@@ -1169,6 +1262,48 @@ struct FrameTimeRecord {
+     uint32_t underruns = 0;    // cumulative
+ };
+ 
++#if defined(NDS_HAVE_SDL3)
++std::string audio_latency_json() {
++    char buf[1400];
++    NdsAudioSystemInfo sys{};
++    nds_audio_system_info(&sys);
++    std::vector<AudioProbeSample> copy;
++    {
++        std::lock_guard<std::mutex> lock(g_audio_probe.mutex);
++        copy = g_audio_probe.samples;
++    }
++    double sum = 0, mn = 1e9, mx = 0, qsum = 0;
++    std::string list;
++    size_t shown = 0;
++    for (size_t i = copy.size() > 40 ? copy.size() - 40 : 0; i < copy.size(); ++i) {
++        const double ms = (copy[i].mix_ns - copy[i].push_ns) / 1e6;
++        sum += ms; qsum += copy[i].queued_frames;
++        mn = std::min(mn, ms); mx = std::max(mx, ms);
++        char item[64];
++        std::snprintf(item, sizeof(item), "%s[%.2f,%u]", shown ? "," : "", ms,
++                      copy[i].queued_frames);
++        list += item; ++shown;
++    }
++    const double n = shown ? static_cast<double>(shown) : 1.0;
++    std::snprintf(buf, sizeof(buf),
++        "{\"test_mode\":%d,\"samples\":%zu,\"push_to_mix_ms\":{\"mean\":%.3f,"
++        "\"min\":%.3f,\"max\":%.3f},\"queued_frames_mean\":%.1f,"
++        "\"queue_target\":%u,\"stream_freq\":%d,\"sdl_device_frames\":%d,"
++        "\"sdl_device_freq\":%d,\"device_frames_hint\":%u,"
++        "\"system\":{\"ok\":%d,\"name\":\"%s\",\"rate\":%.0f,"
++        "\"buffer_frames\":%u,\"min_buffer_frames\":%u,\"device_latency\":%u,"
++        "\"safety_offset\":%u,\"stream_latency\":%u},\"recent\":[",
++        g_audio_probe.test_mode ? 1 : 0, copy.size(), shown ? sum / n : 0.0,
++        shown ? mn : 0.0, mx, shown ? qsum / n : 0.0, g_audio_probe.queue_target,
++        g_audio_probe.stream_freq, g_audio_probe.device_frames,
++        g_audio_probe.device_freq, g_audio_probe.device_frames_hint,
++        sys.ok ? 1 : 0, sys.name, sys.sample_rate, sys.buffer_frames,
++        sys.min_buffer_frames, sys.device_latency, sys.safety_offset,
++        sys.stream_latency);
++    return std::string(buf) + list + "]}";
++}
++#endif
++
+ void clear_audio_queue(const NdsAudioDevice& device, AudioQueue& queue) {
+     if (!device) return;
+ #if defined(NDS_HAVE_SDL3)
+@@ -1208,8 +1343,48 @@ NdsAudioDevice open_audio_device(AudioQueue& queue,
+                                  const SDL_AudioSpec& want) {
+ #if defined(NDS_HAVE_SDL3)
+     NdsAudioDevice device{};
++    // Device IO buffer. SDL's default is large enough to add many ms; ask for
++    // a small one. NDS_AUDIO_DEVICE_FRAMES overrides (0 = leave SDL's default).
++    {
++        uint32_t frames = 64;
++        if (const char* env = std::getenv("NDS_AUDIO_DEVICE_FRAMES"))
++            frames = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
++        g_audio_probe.device_frames_hint = frames;
++        if (frames)
++            SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES,
++                        std::to_string(frames).c_str());
++    }
+     device.stream = SDL_OpenAudioDeviceStream(
+         SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &want, nullptr, nullptr);
++    if (device.stream) {
++        const SDL_AudioDeviceID id = SDL_GetAudioStreamDevice(device.stream);
++        SDL_AudioSpec got{};
++        int got_frames = 0;
++        if (SDL_GetAudioDeviceFormat(id, &got, &got_frames)) {
++            g_audio_probe.device_frames = got_frames;
++            g_audio_probe.device_freq = got.freq;
++        }
++        g_audio_probe.stream_freq = want.freq;
++        // OS IO buffer: the default (512 frames) is most of the OS-side delay.
++        uint32_t os_frames = 64;
++        if (const char* env = std::getenv("NDS_AUDIO_OS_BUFFER_FRAMES"))
++            os_frames = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
++        if (os_frames) {
++            uint32_t applied = 0;
++            if (nds_audio_set_os_buffer_frames(os_frames, &applied))
++                std::fprintf(stderr, "[sdl] audio OS buffer: requested %u, "
++                             "device now %u frames\n", os_frames, applied);
++            else
++                std::fprintf(stderr, "[sdl] audio OS buffer request (%u) "
++                             "not applied\n", os_frames);
++        }
++        if (const char* t = std::getenv("NDS_AUDIO_TEST"))
++            g_audio_probe.test_mode = t[0] == '1';
++        if (g_audio_probe.test_mode &&
++            !SDL_SetAudioPostmixCallback(id, audio_postmix_probe, nullptr))
++            std::fprintf(stderr, "[sdl] audio probe postmix failed: %s\n",
++                         SDL_GetError());
++    }
+     if (device.stream &&
+         !SDL_SetAudioStreamGetCallback(
+             device.stream, audio_stream_underrun_callback, &queue)) {
+@@ -2528,6 +2703,27 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     // At or below that the loop is not keeping up and the synthetic present is
+     // skipped for that frame. Nothing in this path ever sleeps or busy-loops.
+     const uint32_t audio_queue_target = audio_queue_target_frames();
++    // Adaptive floor: start at the configured minimum, add a step for each
++    // underrun burst (a stall longer than the queue covers: scene loads, cold
++    // dispatch), and decay back slowly while clean. NDS_AUDIO_ADAPTIVE=0 pins
++    // the minimum.
++    uint32_t audio_target_now = audio_queue_target;
++    const uint32_t audio_target_cap = std::max<uint32_t>(1024, audio_queue_target);
++    bool audio_adaptive = true;
++    if (const char* env = std::getenv("NDS_AUDIO_ADAPTIVE"))
++        audio_adaptive = env[0] != '0';
++    uint64_t adaptive_last_underruns = 0;
++    uint64_t adaptive_last_change = SDL_GetPerformanceCounter();
++    // Sub-frame audio pushes per DS frame (1 = the old once-per-frame push).
++    uint32_t audio_chunks_per_frame = 16;
++    if (const char* env = std::getenv("NDS_AUDIO_CHUNKS")) {
++        const long parsed = std::strtol(env, nullptr, 10);
++        if (parsed >= 1 && parsed <= 64)
++            audio_chunks_per_frame = static_cast<uint32_t>(parsed);
++    }
++#if defined(NDS_HAVE_SDL3)
++    g_audio_probe.queue_target = audio_queue_target;
++#endif
+     bool auto_hand_rotation = options.auto_hand_rotation;
+     if (const char* env = std::getenv("NDS_AUTO_HAND_ROTATION"))
+         auto_hand_rotation = env[0] == '1';
+@@ -2549,13 +2745,13 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     int hand_candidate = 0;
+     int hand_agree = 0;
+     std::fprintf(stderr, "[sdl] audio queue target=%u frames (~%.1f ms)\n",
+-                 audio_queue_target, audio_queue_target * 1000.0 / 32768.0);
++                 audio_target_now, audio_target_now * 1000.0 / 32768.0);
+     constexpr uint32_t kRecordRing = 1u << 16;
+     std::vector<FrameTimeRecord> frame_ring(kRecordRing);
+     uint64_t frame_ring_count = 0;
+     uint64_t record_prev_tick = SDL_GetPerformanceCounter();
+     uint64_t record_prev_tier3 = 0;
+-    const uint32_t kInterpolationAudioFloorFrames = audio_queue_target / 2;
++    const uint32_t kInterpolationAudioFloorFrames = audio_target_now / 2;
+     int interpolation_min_refresh_hz = kInterpolationMinRefreshHz;
+     if (const uint64_t forced_min_refresh =
+             environment_u64("NDS_FRAME_INTERPOLATION_MIN_REFRESH")) {
+@@ -3108,7 +3304,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         if (!was_open && runtime_menu_open())
+             clear_gameplay_input_for_runtime_menu();
+     };
+-    uint32_t audio_pace_floor = audio_queue_target;
++    uint32_t audio_pace_floor = audio_target_now;
+     uint32_t audio_min_queue = std::numeric_limits<uint32_t>::max();
+     uint32_t audio_max_queue = 0;
+     uint64_t host_key_presses = 0;
+@@ -3244,8 +3440,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             clear_audio_queue(audio, audio_queue);
+             audio_queue.started.store(false, std::memory_order_relaxed);
+             audio_started = false;
+-            audio_start_threshold = audio_queue_target;
+-            audio_pace_floor = audio_queue_target;
++            audio_start_threshold = audio_target_now;
++            audio_pace_floor = audio_target_now;
+             audio_presentation_epoch = current_audio_epoch;
+         }
+         if (selftest_menu) {
+@@ -4160,7 +4356,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                 audio_queue.started.store(false, std::memory_order_relaxed);
+             }
+             audio_started = false;
+-            audio_start_threshold = audio_queue_target;
++            audio_start_threshold = audio_target_now;
+             audio_pace_floor = audio_start_threshold;
+             audio_min_queue = std::numeric_limits<uint32_t>::max();
+             audio_max_queue = 0;
+@@ -4226,10 +4422,28 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         const uint64_t now = scheduler_system_timestamp();
+         const uint64_t next_frame =
+             (now / kSystemCyclesPerFrame + 1u) * kSystemCyclesPerFrame;
++        // Audio is handed to the device every 1/audio_chunks of a frame, not
++        // once per frame: samples the SPU produced early in a frame no longer
++        // wait up to a full frame period (16.7 ms) behind the frame boundary,
++        // and the pacing sleep acts at the same granularity, which is what lets
++        // the queue floor sit near one chunk plus scheduling jitter.
++        const uint64_t audio_chunk_cycles =
++            kSystemCyclesPerFrame / audio_chunks_per_frame;
++        uint64_t next_audio_chunk = now + audio_chunk_cycles;
+         while (running && scheduler_system_timestamp() < next_frame &&
+                !(scheduler_cpu_terminal_halted(0) &&
+                  scheduler_cpu_terminal_halted(1))) {
+             scheduler_run_round();
++            if (audio_chunks_per_frame > 1 && audio && !turbo_active &&
++                scheduler_system_timestamp() >= next_audio_chunk) {
++                next_audio_chunk = scheduler_system_timestamp() +
++                                   audio_chunk_cycles;
++                push_audio(audio, audio_queue, audio_started,
++                           audio_queue_error);
++                if (audio_started)
++                    throttle_audio(audio, audio_queue, true,
++                                   audio_pace_floor);
++            }
+         }
+         // A real DS power-off is an application lifecycle request, not a
+         // debuggable terminal halt. Leave before presenting the powered-down
+@@ -4472,11 +4686,33 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         // fixed step per frame from the prebuffer level down to the steady
+         // 63 ms target, shedding the extra startup latency over a couple of
+         // seconds without ever forcing the queue down during a slow stretch.
++        if (audio_adaptive && audio_started && !turbo_active) {
++            const uint64_t u =
++                audio_queue.underruns.load(std::memory_order_relaxed);
++            const uint64_t t = SDL_GetPerformanceCounter();
++            if (u > adaptive_last_underruns) {
++                adaptive_last_underruns = u;
++                adaptive_last_change = t;
++                if (audio_target_now < audio_target_cap) {
++                    audio_target_now = std::min(audio_target_cap,
++                                                audio_target_now + 128u);
++                    std::fprintf(stderr,
++                                 "[sdl] audio underrun: queue floor raised to "
++                                 "%u frames (~%.1f ms)\n", audio_target_now,
++                                 audio_target_now * 1000.0 / kAudioFrequency);
++                }
++            } else if (audio_target_now > audio_queue_target &&
++                       (t - adaptive_last_change) > frequency * 10u) {
++                audio_target_now = std::max(audio_queue_target,
++                                            audio_target_now - 16u);
++                adaptive_last_change = t - frequency * 5u;  // next step in 5 s
++            }
++        }
+         constexpr uint32_t kGlideStepFrames = 300;
+-        if (audio_pace_floor > audio_queue_target + kGlideStepFrames)
++        if (audio_pace_floor > audio_target_now + kGlideStepFrames)
+             audio_pace_floor -= kGlideStepFrames;
+         else
+-            audio_pace_floor = audio_queue_target;
++            audio_pace_floor = audio_target_now;
+         uint32_t queued = audio_queue_count(audio, audio_queue);
+         if (!turbo_active) {
+             queued = throttle_audio(
+@@ -5105,3 +5341,11 @@ uint32_t nds_frontend_frame_digests(uint64_t from, uint32_t max,
+     if (after - from > kFrameDigestRing) return 0;
+     return copied;
+ }
++
++std::string nds_frontend_audio_latency_json() {
++#if defined(NDS_HAVE_SDL3)
++    return audio_latency_json();
++#else
++    return "{\"error\":\"audio latency probe needs the SDL3 backend\"}";
++#endif
++}
+diff --git a/runner/src/frontend.h b/runner/src/frontend.h
+index da56f41..94d593e 100644
+--- a/runner/src/frontend.h
++++ b/runner/src/frontend.h
+@@ -430,6 +430,9 @@ struct NdsFrontendLiveStats {
+     uint64_t perf_governor_transitions;
+ };
+ void nds_frontend_live_stats(NdsFrontendLiveStats* out);
++// JSON report from the audio latency probe (NDS_AUDIO_TEST=1); see
++// docs/audio_latency.md. Safe to call from any thread.
++std::string nds_frontend_audio_latency_json();
+ 
+ // SDL-event injection and counters for play-mode TCP validation. These
+ // commands intentionally enter through the frontend's normal event path, so
+-- 
+2.54.0 (Apple Git-157)
+

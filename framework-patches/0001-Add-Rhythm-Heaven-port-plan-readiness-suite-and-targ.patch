@@ -1,8 +1,8 @@
 From 6fa1b8cf67204a9e11b86d829c9a6c471ca46eb0 Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Fri, 9 Oct 2026 21:03:50 -0700
-Subject: [PATCH 1/9] Add Rhythm Heaven port plan, readiness suite, and target
- notes
+Subject: [PATCH 01/10] Add Rhythm Heaven port plan, readiness suite, and
+ target notes
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---

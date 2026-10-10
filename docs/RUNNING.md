@@ -34,7 +34,7 @@ raw, melonDS-compatible). Every session also writes
 `~/dev/rh-build/play/frame_times-<stamp>.csv` (per-frame timing) and a Tier-3 coverage
 manifest to `~/dev/rh-build/coverage/` (feed it to ingest to close coverage gaps).
 `python3 tools/analyze_frames.py <csv>` explains slow frames.
-Env: `NDS_AUDIO_QUEUE_FRAMES` (256..4096, default 1024), `NDS_VSYNC=0`.
+Env: `NDS_AUDIO_QUEUE_FRAMES` (min floor, default 192, adaptive), `NDS_AUDIO_OS_BUFFER_FRAMES` (default 64), `NDS_VSYNC=0`; see framework docs/audio_latency.md. Measure with `python3 tools/test_audio_delay.py --rom ROM` (clicks audibly).
 
 ## 3. Live debug over TCP (any time, any ring)
 ```
