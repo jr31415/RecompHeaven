@@ -16,3 +16,14 @@ See README.md. Facts about the ROM live in the framework CLAUDE.md.
   real device or a matching runtime. A signing identity exists but no provisioning/registration was done.
 - Note: a process launched through `simctl spawn` hangs in fopen() on a ROM under iCloud Drive; use a
   local copy outside iCloud.
+
+## App builder (2026-10-10)
+`tools/build_app.py --rom ROM --work DIR --framework FW --recomp-ui UI --target macos|ios-sim|ios-device`
+rebuilds everything from the user's ROM (images -> recompiler -> FreeBIOS banks -> title banks from
+`data/ingest/seeds` (address lists only) -> SDL3 -> runner -> `.app`/`.ipa`). Verified end to end for
+`macos` from an empty work dir (587 build steps). ios-sim/ios-device targets compile and link
+(device Mach-O platform IOS); UIKit launch untested (see iOS section).
+Without captured-page banks (`--no-page-banks`, needed because those pages are ROM+runtime bytes that
+cannot be shipped) a minigame launch interprets ~3.0M ARM9 insns vs 0.48M with them (both vs 54.6M
+before the close-out). Next step if wanted: have the builder run a scripted capture to materialise
+the page banks itself.
