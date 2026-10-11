@@ -30,9 +30,19 @@ def fuzz_run(job):
     s = Session(runner, rom, w, save=sv)
     try:
         boot_to_map(s); s.run(5)
+        if game.get("hub"):
+            # ring icon -> hub -> category -> (scroll) -> item -> PLAY
+            s.touch(22, 95, 6); s.run(240)
+            s.touch(game["cat_x"], 95, 6); s.run(200)
+            for _ in range(game["scrolls"]):
+                s.touch(208, 95, 6); s.run(60)
+            s.touch(game["item_x"], 95, 6); s.run(60)
+            s.touch(238, 135, 6); s.run(120)
+            game = dict(game, chain=[], hashes=[], x=-1, y=-1)
         for hx, hy, dx, dy in game["chain"]:
             pan(s, hx, hy, dx, dy)
-        tap_game_tile(s, game); s.run(40); s.touch(game["x"], game["y"], 6); s.run(120)
+        if game["x"] >= 0:
+            tap_game_tile(s, game); s.run(40); s.touch(game["x"], game["y"], 6); s.run(120)
         mode = seed % 3          # 0 sparse, 1 dense, 2 beat-locked
         period = rnd.choice([20, 24, 26, 28, 30, 32, 36, 40])
         phase = rnd.randrange(period)
