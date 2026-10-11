@@ -1,4 +1,4 @@
-# Entry points observed in Tier-3 coverage manifests of real play sessions (addresses only).
+# Entry points observed in Tier-3 coverage manifests of real play and coverage fuzzing (addresses only).
 [[entry_point]]
 addr = 0x02288000
 mode = "arm"

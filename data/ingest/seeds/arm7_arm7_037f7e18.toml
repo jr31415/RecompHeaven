@@ -1,4 +1,4 @@
-# Entry points observed in Tier-3 coverage manifests of real play sessions (addresses only).
+# Entry points observed in Tier-3 coverage manifests of real play and coverage fuzzing (addresses only).
 [[entry_point]]
 addr = 0x037f8000
 mode = "arm"
@@ -1345,6 +1345,18 @@ mode = "arm"
 
 [[entry_point]]
 addr = 0x037fddbc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x037fddc4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x037fddd4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x037fddec
 mode = "arm"
 
 [[entry_point]]
@@ -3288,11 +3300,19 @@ addr = 0x0380127c
 mode = "arm"
 
 [[entry_point]]
+addr = 0x03801280
+mode = "arm"
+
+[[entry_point]]
 addr = 0x03801284
 mode = "arm"
 
 [[entry_point]]
 addr = 0x03801288
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0380128c
 mode = "arm"
 
 [[entry_point]]
@@ -3341,6 +3361,10 @@ mode = "arm"
 
 [[entry_point]]
 addr = 0x038012ec
+mode = "arm"
+
+[[entry_point]]
+addr = 0x038012f8
 mode = "arm"
 
 [[entry_point]]
@@ -3520,6 +3544,10 @@ addr = 0x038019e0
 mode = "arm"
 
 [[entry_point]]
+addr = 0x038019e4
+mode = "arm"
+
+[[entry_point]]
 addr = 0x038019e8
 mode = "arm"
 
@@ -3529,6 +3557,10 @@ mode = "arm"
 
 [[entry_point]]
 addr = 0x03801a30
+mode = "arm"
+
+[[entry_point]]
+addr = 0x03801a58
 mode = "arm"
 
 [[entry_point]]
@@ -4732,7 +4764,15 @@ addr = 0x03803d0c
 mode = "arm"
 
 [[entry_point]]
+addr = 0x03803d14
+mode = "arm"
+
+[[entry_point]]
 addr = 0x03803d20
+mode = "arm"
+
+[[entry_point]]
+addr = 0x03803d34
 mode = "arm"
 
 [[entry_point]]
@@ -4952,6 +4992,30 @@ addr = 0x038048cc
 mode = "arm"
 
 [[entry_point]]
+addr = 0x038048e0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x038048fc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x03804960
+mode = "arm"
+
+[[entry_point]]
+addr = 0x038049b4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x038049c0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x03804a88
+mode = "arm"
+
+[[entry_point]]
 addr = 0x03804a9c
 mode = "arm"
 
@@ -4968,7 +5032,27 @@ addr = 0x03804af8
 mode = "arm"
 
 [[entry_point]]
+addr = 0x03804b0c
+mode = "arm"
+
+[[entry_point]]
 addr = 0x03804b14
+mode = "arm"
+
+[[entry_point]]
+addr = 0x03804b3c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x03804b48
+mode = "arm"
+
+[[entry_point]]
+addr = 0x03804b64
+mode = "arm"
+
+[[entry_point]]
+addr = 0x03804b70
 mode = "arm"
 
 [[entry_point]]

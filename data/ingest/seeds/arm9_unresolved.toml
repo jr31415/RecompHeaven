@@ -1,4 +1,4 @@
-# Entry points observed in Tier-3 coverage manifests of real play sessions (addresses only).
+# Entry points observed in Tier-3 coverage manifests of real play and coverage fuzzing (addresses only).
 [[entry_point]]
 addr = 0x01ff8000
 mode = "arm"
@@ -29,6 +29,126 @@ mode = "arm"
 
 [[entry_point]]
 addr = 0x01ff8150
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff81e4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8200
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8218
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff821c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8238
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff825c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8274
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8280
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8288
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8294
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff82a0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff82a8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff82b0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff82bc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff82e4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff82f4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8300
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8328
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8358
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8368
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff837c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8388
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff8394
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff83a8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff83b8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff83c4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff83d8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff83e4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff83ec
+mode = "arm"
+
+[[entry_point]]
+addr = 0x01ff83fc
 mode = "arm"
 
 [[entry_point]]

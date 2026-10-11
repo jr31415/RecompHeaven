@@ -60,6 +60,23 @@ for stem, sfs in sorted(seed_files.items()):
         base, blob,
         [e for f in sfs for e in entries_of(f)])
 
+# ITCM autoload block (hot library routines the ARM9 copies to 0x01FF8000): it
+# is ROM data, so it is a first-class module. Seeds come from every observed
+# address that falls inside it, whichever seed file the ingest filed it under.
+al = img / "autoload.json"
+if al.exists():
+    blocks = json.loads(al.read_text())
+    for k, b in enumerate(blocks):
+        base, size = int(b["addr"]) if isinstance(b["addr"], int) else int(b["addr"], 16), b["size"]
+        f = img / f"autoload{k}.bin"
+        if base != 0x01FF8000 or not f.exists():
+            continue
+        seeds = []
+        for sfs in seed_files.values():
+            for sf in sfs:
+                seeds += [(a, m) for a, m in entries_of(sf) if base <= int(a, 16) < base + size]
+        add(f"rh_arm9_itcm_{base:08x}", "arm9", "armv5te", base, f.read_bytes(), seeds)
+
 # Runtime-materialised pages that exist nowhere in the ROM (ingest wrote bin+toml).
 page_ids = set()
 for ing in ([] if a.no_page_banks else ingests):
