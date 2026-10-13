@@ -1,0 +1,206 @@
+From 351ab19196ee713637411c9280997daf3b41a253 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Tue, 13 Oct 2026 14:38:04 -0700
+Subject: [PATCH] iOS latency: IO buffer request via AVAudioSession, 2
+ drawables, QoS user-interactive, faster adaptive audio floor decay,
+ runner.log
+
+---
+ runner/CMakeLists.txt            |  1 +
+ runner/src/audio_device_info.cpp |  6 +++
+ runner/src/audio_device_info.h   |  4 ++
+ runner/src/frontend.cpp          | 17 +++++++--
+ runner/src/ios_audio.mm          | 63 ++++++++++++++++++++++++++++++++
+ runner/src/ios_launch.mm         |  3 ++
+ 6 files changed, 91 insertions(+), 3 deletions(-)
+ create mode 100644 runner/src/ios_audio.mm
+
+diff --git a/runner/CMakeLists.txt b/runner/CMakeLists.txt
+index 0005dd8..bfb30f3 100644
+--- a/runner/CMakeLists.txt
++++ b/runner/CMakeLists.txt
+@@ -822,6 +822,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     set(NDS_IOS_APP_NAME "NDS Recomp" CACHE STRING "Home-screen name")
+     set(NDS_IOS_GAME_CONFIG "" CACHE FILEPATH
+         "Optional game.toml copied into the bundle as game.toml")
++    target_sources(nds_runner PRIVATE src/ios_audio.mm)
+     if(NOT NDS_SDL_BACKEND STREQUAL "NONE")
+     target_sources(nds_runner PRIVATE src/ios_launch.mm)
+     set_target_properties(nds_runner PROPERTIES
+diff --git a/runner/src/audio_device_info.cpp b/runner/src/audio_device_info.cpp
+index ca3d8cb..623462b 100644
+--- a/runner/src/audio_device_info.cpp
++++ b/runner/src/audio_device_info.cpp
+@@ -120,6 +120,8 @@ bool nds_audio_set_os_buffer_frames(uint32_t frames, uint32_t* applied) {
+         *applied = now;
+     return status == noErr;
+ }
++#elif defined(__APPLE__) && TARGET_OS_IOS
++// iOS implementation lives in ios_audio.mm (AVAudioSession).
+ #else
+ bool nds_audio_set_os_buffer_frames(uint32_t, uint32_t* applied) {
+     if (applied) *applied = 0;
+@@ -130,3 +132,7 @@ bool nds_audio_system_info(NdsAudioSystemInfo* out) {
+     return false;
+ }
+ #endif
++
++#if !(defined(__APPLE__) && TARGET_OS_IOS)
++void nds_ios_tune_display(void*) {}
++#endif
+diff --git a/runner/src/audio_device_info.h b/runner/src/audio_device_info.h
+index cf3f428..8aeb267 100644
+--- a/runner/src/audio_device_info.h
++++ b/runner/src/audio_device_info.h
+@@ -24,3 +24,7 @@ bool nds_audio_system_info(NdsAudioSystemInfo* out);
+ // device reports afterwards in *applied. Process-scoped on macOS: the hint
+ // ends with the process.
+ bool nds_audio_set_os_buffer_frames(uint32_t frames, uint32_t* applied);
++
++// iOS only (no-op elsewhere): trim presentation latency of a CAMetalLayer*
++// (maximumDrawableCount 2 = at most one frame queued ahead of the display).
++void nds_ios_tune_display(void* metal_layer);
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index 782ee2b..a7a8379 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -19,6 +19,9 @@
+ #include <memory>
+ #include <mutex>
+ #include <pthread.h>
++#if defined(__APPLE__)
++#include <pthread/qos.h>
++#endif
+ #include <thread>
+ #include <fstream>
+ #include <initializer_list>
+@@ -778,6 +781,11 @@ bool sdl_init_frontend() {
+ }
+ 
+ bool sdl_set_thread_priority_high() {
++#if defined(__APPLE__)
++    // Interactive QoS keeps the emulation/present threads on performance
++    // cores and ahead of background work (matters most on iPadOS).
++    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++#endif
+ #if defined(NDS_HAVE_SDL3)
+     return SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+ #else
+@@ -2345,6 +2353,9 @@ bool create_presentation(const NdsFrontendOptions& options,
+         } else {
+             std::fprintf(stderr, "[sdl] vsync: off (NDS_VSYNC=0)\n");
+         }
++        // iOS: at most one presented frame queued ahead of the display (the
++        // default is three drawables, i.e. up to two frames of added delay).
++        nds_ios_tune_display(SDL_GetRenderMetalLayer(presentation.renderers[0]));
+ #endif
+     }
+ 
+@@ -2804,7 +2815,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         audio_adaptive = env[0] != '0';
+     if (audio_adaptive)
+         audio_target_now = std::min<uint32_t>(
+-            audio_target_cap, std::max<uint32_t>(audio_queue_target, 768));
++            audio_target_cap, std::max<uint32_t>(audio_queue_target, 512));
+     uint64_t adaptive_last_underruns = 0;
+     uint64_t adaptive_last_change = SDL_GetPerformanceCounter();
+     // Sub-frame audio pushes per DS frame (1 = the old once-per-frame push).
+@@ -4854,10 +4865,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                                  audio_target_now * 1000.0 / kAudioFrequency);
+                 }
+             } else if (audio_target_now > audio_queue_target &&
+-                       (t - adaptive_last_change) > frequency * 4u) {
++                       (t - adaptive_last_change) > frequency * 3u) {
+                 audio_target_now = std::max(audio_queue_target,
+                                             audio_target_now - 32u);
+-                adaptive_last_change = t - frequency * 2u;  // next step in 2 s
++                adaptive_last_change = t - frequency * 2u;  // next step in 1 s
+             }
+         }
+         constexpr uint32_t kGlideStepFrames = 300;
+diff --git a/runner/src/ios_audio.mm b/runner/src/ios_audio.mm
+new file mode 100644
+index 0000000..4da508b
+--- /dev/null
++++ b/runner/src/ios_audio.mm
+@@ -0,0 +1,63 @@
++// iOS audio-session and display latency tuning. The OS default IO buffer is
++// ~1024 frames (about 21 ms at 48 kHz); SDL does not shrink it, so ask here.
++#import <TargetConditionals.h>
++
++#if TARGET_OS_IOS
++
++#import <AVFAudio/AVFAudio.h>
++#import <QuartzCore/CAMetalLayer.h>
++
++#include <cmath>
++#include <cstdio>
++#include <cstring>
++
++#include "audio_device_info.h"
++
++bool nds_audio_set_os_buffer_frames(uint32_t frames, uint32_t* applied) {
++    @autoreleasepool {
++        AVAudioSession* session = [AVAudioSession sharedInstance];
++        const double rate = session.sampleRate > 0 ? session.sampleRate : 48000.0;
++        NSError* err = nil;
++        [session setPreferredIOBufferDuration:static_cast<double>(frames) / rate
++                                        error:&err];
++        if (err) std::fprintf(stderr, "[ios-audio] preferred IO buffer: %s\n",
++                              err.localizedDescription.UTF8String);
++        err = nil;
++        [session setActive:YES error:&err];
++        if (applied)
++            *applied = static_cast<uint32_t>(
++                std::lround(session.IOBufferDuration * session.sampleRate));
++        return err == nil;
++    }
++}
++
++bool nds_audio_system_info(NdsAudioSystemInfo* out) {
++    if (!out) return false;
++    *out = NdsAudioSystemInfo{};
++    @autoreleasepool {
++        AVAudioSession* s = [AVAudioSession sharedInstance];
++        out->ok = true;
++        out->sample_rate = s.sampleRate;
++        out->buffer_frames =
++            static_cast<uint32_t>(std::lround(s.IOBufferDuration * s.sampleRate));
++        out->device_latency =
++            static_cast<uint32_t>(std::lround(s.outputLatency * s.sampleRate));
++        AVAudioSessionPortDescription* port =
++            s.currentRoute.outputs.firstObject;
++        if (port)
++            std::strncpy(out->name, port.portName.UTF8String,
++                         sizeof(out->name) - 1);
++    }
++    return true;
++}
++
++void nds_ios_tune_display(void* layer) {
++    if (!layer) return;
++    CAMetalLayer* l = (__bridge CAMetalLayer*)layer;
++    if ([l isKindOfClass:[CAMetalLayer class]]) {
++        l.maximumDrawableCount = 2;
++        l.presentsWithTransaction = NO;
++    }
++}
++
++#endif
+diff --git a/runner/src/ios_launch.mm b/runner/src/ios_launch.mm
+index 74cfccf..6d6cee7 100644
+--- a/runner/src/ios_launch.mm
++++ b/runner/src/ios_launch.mm
+@@ -54,6 +54,9 @@ int run(int argc, char** argv) {
+     if (argc > 1) return nds_runner_main(argc, argv);  // explicit args win
+     const std::string docs = documents_dir();
+     chdir(docs.c_str());
++    // stderr is invisible on a device; keep the runner's diagnostics (audio
++    // buffer sizes, underruns, frame pacing) where Files / devicectl can read them.
++    freopen((docs + "/runner.log").c_str(), "w", stderr);
+     const std::string rom = find_rom(docs);
+     if (rom.empty()) {
+         SDL_ShowSimpleMessageBox(
+-- 
+2.54.0 (Apple Git-157)
+
