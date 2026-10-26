@@ -51,6 +51,7 @@ def estimate_module(blob, base, funcs):
         cov[a:a + n] = b"\x01" * n
     pool = bytearray(size)
     direct = set()          # branch targets from covered code (offsets, thumb flag)
+    jt_slots = set()        # computed-branch table slots (ARM `add pc,pc,..` + run of `b`)
     for a, n, thumb in funcs:
         md = THUMB if thumb else ARM
         for ins in decode(md, blob, a, n, base):
@@ -66,6 +67,16 @@ def estimate_module(blob, base, funcs):
                 for op in ins.operands:
                     if op.type == cs.arm.ARM_OP_IMM:
                         direct.add((op.imm - base, thumb))
+            if not thumb and ins.operands and ins.operands[0].type == cs.arm.ARM_OP_REG \
+                    and ins.operands[0].reg == cs.arm.ARM_REG_PC and ins.mnemonic[:3] in ("add", "ldr") \
+                    and len(ins.operands) >= 2:
+                tbl = ins.address - base + 8
+                while 0 <= tbl + 4 <= size:
+                    nxt = next(ARM.disasm(blob[tbl:tbl + 4], base + tbl, 1), None)
+                    if nxt is None or nxt.mnemonic != "b":
+                        break
+                    jt_slots.add((tbl, False))
+                    tbl += 4
     gap = [i for i in range(size) if not cov[i] and not pool[i]]
     gapset = bytearray(size)
     for i in gap:
@@ -158,7 +169,7 @@ def estimate_module(blob, base, funcs):
     run(seedsB, "B")      # strongest first so provenance is credited to the best evidence
     run(seedsA, "A")
     run(seedsC, "C")
-    valid_seeds = sorted({(o, th) for tag, ss in (('B', seedsB), ('A', seedsA), ('C', seedsC)) for o, th in ss if claimed[tag][o]})
+    valid_seeds = sorted(jt_slots | {(o, th) for tag, ss in (('B', seedsB), ('A', seedsA), ('C', seedsC)) for o, th in ss if claimed[tag][o]})
     return dict(size=size, covered=sum(cov), pool=sum(pool),
                 A=sum(claimed["A"]), B=sum(claimed["B"]), C=sum(claimed["C"]),
                 gap=len(gap), seeds=valid_seeds)

@@ -48,6 +48,14 @@ addr = 0x022877e4
 mode = "arm"
 
 [[entry_point]]
+addr = 0x022877fc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287800
+mode = "arm"
+
+[[entry_point]]
 addr = 0x0228790c
 mode = "arm"
 

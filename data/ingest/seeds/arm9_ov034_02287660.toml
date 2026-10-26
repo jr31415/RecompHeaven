@@ -1352,6 +1352,10 @@ addr = 0x02287d98
 mode = "arm"
 
 [[entry_point]]
+addr = 0x02287d9c
+mode = "arm"
+
+[[entry_point]]
 addr = 0x02287da0
 mode = "arm"
 

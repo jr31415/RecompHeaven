@@ -2200,6 +2200,10 @@ addr = 0x022882e8
 mode = "arm"
 
 [[entry_point]]
+addr = 0x022882ec
+mode = "arm"
+
+[[entry_point]]
 addr = 0x022882f8
 mode = "arm"
 

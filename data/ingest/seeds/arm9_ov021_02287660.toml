@@ -1284,6 +1284,10 @@ addr = 0x02287d30
 mode = "arm"
 
 [[entry_point]]
+addr = 0x02287d34
+mode = "arm"
+
+[[entry_point]]
 addr = 0x02287d40
 mode = "arm"
 
@@ -1756,6 +1760,70 @@ addr = 0x0228806c
 mode = "arm"
 
 [[entry_point]]
+addr = 0x02288088
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228808c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288090
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288094
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288098
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228809c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880a0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880a4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880a8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880ac
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880b0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880b4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880b8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880bc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880c0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880c4
+mode = "arm"
+
+[[entry_point]]
 addr = 0x022882c0
 mode = "arm"
 
@@ -1792,6 +1860,14 @@ addr = 0x0228856c
 mode = "arm"
 
 [[entry_point]]
+addr = 0x0228858c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288590
+mode = "arm"
+
+[[entry_point]]
 addr = 0x0228873c
 mode = "arm"
 
@@ -1817,5 +1893,9 @@ mode = "arm"
 
 [[entry_point]]
 addr = 0x0228893c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288a54
 mode = "arm"
 
