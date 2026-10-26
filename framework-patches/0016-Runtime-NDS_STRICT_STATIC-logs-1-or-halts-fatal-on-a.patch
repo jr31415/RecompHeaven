@@ -1,0 +1,68 @@
+From 25f686b43f2b6d63e809e381b666de5f20c41017 Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Sun, 25 Oct 2026 20:01:10 -0700
+Subject: [PATCH] Runtime: NDS_STRICT_STATIC logs (=1) or halts (=fatal) on any
+ interpreter entry
+
+---
+ runner/src/runtime_arm.cpp | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/runner/src/runtime_arm.cpp b/runner/src/runtime_arm.cpp
+index 30fa416..8431424 100644
+--- a/runner/src/runtime_arm.cpp
++++ b/runner/src/runtime_arm.cpp
+@@ -111,6 +111,17 @@ NdsCpu      g_nds_active = NDS_ARM9;
+ bool        g_nds_terminal = false;
+ const char* g_nds_halt_reason = nullptr;
+ bool        g_discover_static_misses = false;
++// NDS_STRICT_STATIC=1: every interpreter (Tier 3) entry is logged to stderr;
++// =fatal: it halts instead. This is how "no CPU interpreter" is enforced, not
++// just measured. Unset = normal behaviour (Tier 3 fallback stays available).
++int nds_strict_static_mode() {
++    static const int mode = [] {
++        const char* e = std::getenv("NDS_STRICT_STATIC");
++        if (!e || !*e || e[0] == '0') return 0;
++        return std::strcmp(e, "fatal") == 0 ? 2 : 1;
++    }();
++    return mode;
++}
+ bool        g_nds_force_tier3 = false;
+ unsigned long long g_nds_force_tier3_misses = 0;
+ 
+@@ -1740,6 +1751,16 @@ void runtime_dispatch_impl(uint32_t target_pc, NdsLinkSlot* linked) {
+             bus_range_has_write_provenance(pc, thumb ? 2u : 4u);
+         if (nds_dispatch_miss_decision(mapped_writable, has_provenance) ==
+             NdsDispatchMissDecision::Tier3) {
++            if (const int strict = nds_strict_static_mode()) {
++                std::fprintf(stderr,
++                    "[strict-static] interpreter needed: cpu=%s pc=0x%08X %s lr=0x%08X\n",
++                    g_nds_active == NDS_ARM9 ? "arm9" : "arm7", pc,
++                    thumb ? "thumb" : "arm", g_cpu.R[14]);
++                if (strict == 2) {
++                    runtime_dispatch_miss(target_pc);
++                    return;
++                }
++            }
+             live_overlay_note_lookup(g_nds_active, pc, target_pc, g_cpu.R[14],
+                                      g_cpu.cpsr, nullptr, nullptr, 0u,
+                                      "tier3");
+@@ -1950,6 +1971,15 @@ extern "C" void runtime_dispatch_bad_entry(uint32_t target_pc) {
+         bus_range_has_write_provenance(pc, thumb ? 2u : 4u);
+     if (nds_dispatch_miss_decision(mapped_writable, has_provenance) ==
+         NdsDispatchMissDecision::Tier3) {
++        if (const int strict = nds_strict_static_mode()) {
++            std::fprintf(stderr,
++                "[strict-static] interpreter needed (bad entry): cpu=%s pc=0x%08X lr=0x%08X\n",
++                g_nds_active == NDS_ARM9 ? "arm9" : "arm7", pc, g_cpu.R[14]);
++            if (strict == 2) {
++                runtime_dispatch_miss(target_pc);
++                return;
++            }
++        }
+         live_overlay_note_lookup(g_nds_active, pc, target_pc, g_cpu.R[14],
+                                  g_cpu.cpsr, nullptr, nullptr, 0u,
+                                  "bad-entry-tier3");
+-- 
+2.54.0 (Apple Git-157)
+
