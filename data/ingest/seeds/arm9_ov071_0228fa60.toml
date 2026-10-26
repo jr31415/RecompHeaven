@@ -1,1 +1,101 @@
 # Entry points: observed in Tier-3 manifests plus recovered candidates (addresses only).
+[[entry_point]]
+addr = 0x0228fa64
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fa68
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fa8c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228faa4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fabc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fad4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228faec
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb04
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb1c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb34
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb4c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb70
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fba4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fbd8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fc10
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fc48
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fc80
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fcc4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fd0c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fd60
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fdb8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fe18
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fe7c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fee0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228ff44
+mode = "arm"
+

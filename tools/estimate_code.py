@@ -92,6 +92,7 @@ def estimate_module(blob, base, funcs):
                         break
                     jt_slots.add((tbl, False))
                     tbl += 4
+    entry_offsets = {a for a, _, _ in funcs}
     gap = [i for i in range(size) if not cov[i] and not pool[i]]
     gapset = bytearray(size)
     for i in gap:
@@ -99,12 +100,16 @@ def estimate_module(blob, base, funcs):
     in_gap = lambda o: 0 <= o < size and gapset[o]
 
     seedsA, seedsB, seedsC = set(), set(), set()
+    seedsE = set()          # pointers to the middle of compiled code (case labels, callbacks)
     # A: pointers anywhere
     for o in range(0, size - 3, 4):
         w = struct.unpack_from("<I", blob, o)[0]
         t = w & ~1
         if base <= t < base + size and in_gap(t - base):
             seedsA.add((t - base, bool(w & 1)))
+        elif base <= t < base + size and cov[t - base] and (t & (1 if (w & 1) else 3)) == 0 \
+                and not pool[o] and (t - base) not in entry_offsets:
+            seedsE.add((t - base, bool(w & 1)))
     # B: direct targets out of covered code
     for t, th in direct:
         if in_gap(t):
@@ -186,7 +191,7 @@ def estimate_module(blob, base, funcs):
     run(seedsA, "A")
     run(seedsC, "C")
     run(seedsD, "D", 1)
-    valid_seeds = sorted(jt_slots | {(o, th) for tag, ss in (('B', seedsB), ('A', seedsA), ('C', seedsC), ('D', seedsD)) for o, th in ss if claimed[tag][o]})
+    valid_seeds = sorted(jt_slots | seedsE | {(o, th) for tag, ss in (('B', seedsB), ('A', seedsA), ('C', seedsC), ('D', seedsD)) for o, th in ss if claimed[tag][o]})
     return dict(size=size, covered=sum(cov), pool=sum(pool),
                 A=sum(claimed["A"]), B=sum(claimed["B"]), C=sum(claimed["C"]) + sum(claimed["D"]),
                 gap=len(gap), seeds=valid_seeds)

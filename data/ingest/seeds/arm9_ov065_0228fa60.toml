@@ -1,1 +1,153 @@
 # Entry points: observed in Tier-3 manifests plus recovered candidates (addresses only).
+[[entry_point]]
+addr = 0x0228fa84
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fa98
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228faac
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fac0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fad8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228faf0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb08
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb20
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb38
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb50
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb68
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb80
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fb98
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fbb0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fbc8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fbe0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fbf8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fc10
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fc28
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fc40
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fc58
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fc70
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fc88
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fca0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fcc4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fcfc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fd44
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fd94
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fdf8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fe64
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228fed4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228ff5c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02290020
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022900f0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022901e0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02290368
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02290620
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02290628
+mode = "arm"
+
