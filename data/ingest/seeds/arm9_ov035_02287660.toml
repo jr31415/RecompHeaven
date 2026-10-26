@@ -1,0 +1,153 @@
+# Entry points: observed in Tier-3 manifests, plus statically recovered function candidates (tools/estimate_code.py --emit-seeds). Addresses only.
+[[entry_point]]
+addr = 0x02287814
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287828
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287848
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022879b8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287e0c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287e20
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287e3c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287e90
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022880fc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288110
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288130
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022881fc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288218
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022882f0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288300
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288368
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022883e4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288414
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288428
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288444
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228845c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288588
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288610
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288754
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288788
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228880c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288838
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022888e0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022888f4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288918
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288948
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228896c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288af8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288b80
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288bc0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288bc8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288bd0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288bdc
+mode = "arm"
+

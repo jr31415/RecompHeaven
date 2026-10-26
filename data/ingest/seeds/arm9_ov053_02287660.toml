@@ -1,4 +1,40 @@
-# Entry points observed in Tier-3 coverage manifests of real play and coverage fuzzing (addresses only).
+# Entry points: observed in Tier-3 manifests, plus statically recovered function candidates (tools/estimate_code.py --emit-seeds). Addresses only.
+[[entry_point]]
+addr = 0x02287664
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287814
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287824
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228788c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287e08
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287e44
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287e68
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287e94
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287eb8
+mode = "arm"
+
 [[entry_point]]
 addr = 0x02288000
 mode = "arm"
@@ -173,6 +209,10 @@ mode = "arm"
 
 [[entry_point]]
 addr = 0x0228826c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288278
 mode = "arm"
 
 [[entry_point]]
@@ -576,6 +616,10 @@ addr = 0x022887a4
 mode = "arm"
 
 [[entry_point]]
+addr = 0x022887b8
+mode = "arm"
+
+[[entry_point]]
 addr = 0x022887e0
 mode = "arm"
 
@@ -620,6 +664,10 @@ addr = 0x0228884c
 mode = "arm"
 
 [[entry_point]]
+addr = 0x02288858
+mode = "arm"
+
+[[entry_point]]
 addr = 0x02288870
 mode = "arm"
 
@@ -629,6 +677,10 @@ mode = "arm"
 
 [[entry_point]]
 addr = 0x022888ac
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022888b0
 mode = "arm"
 
 [[entry_point]]

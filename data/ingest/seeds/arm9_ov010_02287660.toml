@@ -1,0 +1,105 @@
+# Entry points: observed in Tier-3 manifests, plus statically recovered function candidates (tools/estimate_code.py --emit-seeds). Addresses only.
+[[entry_point]]
+addr = 0x02287804
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02287824
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228784c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228787c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x0228802c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288078
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022881f4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022882a8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288320
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288338
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022883a0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288744
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288774
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288788
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022887a4
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022887c8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288808
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288890
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022889cc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022889ec
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288b80
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288ca8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288cbc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288ce0
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288cfc
+mode = "arm"
+
+[[entry_point]]
+addr = 0x02288d48
+mode = "arm"
+
