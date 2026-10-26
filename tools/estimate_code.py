@@ -44,6 +44,18 @@ def decode(md, blob, off, n, base):
     return list(md.disasm(blob[off:off + n], base + off))
 
 
+def is_end_early(ins):
+    if ins.cc not in (cs.arm.ARM_CC_AL, cs.arm.ARM_CC_INVALID):
+        return False
+    m = ins.mnemonic
+    if m in ("b", "bx"):
+        return True
+    pc = lambda op: op.type == cs.arm.ARM_OP_REG and op.reg == cs.arm.ARM_REG_PC
+    if m.startswith(("pop", "ldm")) and any(pc(o) for o in ins.operands):
+        return True
+    return m in ("mov", "movs", "ldr") and bool(ins.operands) and pc(ins.operands[0])
+
+
 def estimate_module(blob, base, funcs):
     size = len(blob)
     cov = bytearray(size)
@@ -52,6 +64,7 @@ def estimate_module(blob, base, funcs):
     pool = bytearray(size)
     direct = set()          # branch targets from covered code (offsets, thumb flag)
     jt_slots = set()        # computed-branch table slots (ARM `add pc,pc,..` + run of `b`)
+    after_end = set()       # address right after an unconditional return/branch (adjacent stubs)
     for a, n, thumb in funcs:
         md = THUMB if thumb else ARM
         for ins in decode(md, blob, a, n, base):
@@ -67,6 +80,8 @@ def estimate_module(blob, base, funcs):
                 for op in ins.operands:
                     if op.type == cs.arm.ARM_OP_IMM:
                         direct.add((op.imm - base, thumb))
+            if is_end_early(ins):
+                after_end.add((ins.address - base + ins.size, thumb))
             if not thumb and ins.operands and ins.operands[0].type == cs.arm.ARM_OP_REG \
                     and ins.operands[0].reg == cs.arm.ARM_REG_PC and ins.mnemonic[:3] in ("add", "ldr") \
                     and len(ins.operands) >= 2:
@@ -104,7 +119,8 @@ def estimate_module(blob, base, funcs):
         if in_gap(o) and (h & 0xFF00) == 0xB500:
             seedsC.add((o, True))
 
-    claimed = {"A": bytearray(size), "B": bytearray(size), "C": bytearray(size)}
+    seedsD = {(o, th) for o, th in after_end if in_gap(o)}
+    claimed = {"A": bytearray(size), "B": bytearray(size), "C": bytearray(size), "D": bytearray(size)}
     any_claim = bytearray(size)
     BAD = {"svc", "swi", "bkpt", "udf", "cdp", "cdp2", "mcr2", "mrc2", "ldc", "stc", "ldc2", "stc2"}
 
@@ -123,7 +139,7 @@ def estimate_module(blob, base, funcs):
             return True
         return False
 
-    def trace(seed):
+    def trace(seed, minlen=3):
         """Decode everything reachable from `seed`; None if it is not a clean function."""
         seen = {}
         work = [seed]
@@ -153,13 +169,13 @@ def estimate_module(blob, base, funcs):
                 if is_end(ins):
                     break
                 o += ins.size
-        return seen if len(seen) >= 3 else None
+        return seen if len(seen) >= minlen else None
 
-    def run(seeds, tag):
+    def run(seeds, tag, minlen=3):
         for o, th in sorted(seeds):
             if any_claim[o]:
                 continue
-            seen = trace((o, th))
+            seen = trace((o, th), minlen)
             if not seen:
                 continue
             for a0, n in seen.items():
@@ -169,9 +185,10 @@ def estimate_module(blob, base, funcs):
     run(seedsB, "B")      # strongest first so provenance is credited to the best evidence
     run(seedsA, "A")
     run(seedsC, "C")
-    valid_seeds = sorted(jt_slots | {(o, th) for tag, ss in (('B', seedsB), ('A', seedsA), ('C', seedsC)) for o, th in ss if claimed[tag][o]})
+    run(seedsD, "D", 1)
+    valid_seeds = sorted(jt_slots | {(o, th) for tag, ss in (('B', seedsB), ('A', seedsA), ('C', seedsC), ('D', seedsD)) for o, th in ss if claimed[tag][o]})
     return dict(size=size, covered=sum(cov), pool=sum(pool),
-                A=sum(claimed["A"]), B=sum(claimed["B"]), C=sum(claimed["C"]),
+                A=sum(claimed["A"]), B=sum(claimed["B"]), C=sum(claimed["C"]) + sum(claimed["D"]),
                 gap=len(gap), seeds=valid_seeds)
 
 

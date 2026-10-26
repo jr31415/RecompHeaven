@@ -192,6 +192,10 @@ addr = 0x02287764
 mode = "arm"
 
 [[entry_point]]
+addr = 0x02287770
+mode = "arm"
+
+[[entry_point]]
 addr = 0x02287774
 mode = "arm"
 
@@ -1272,6 +1276,10 @@ addr = 0x02287d18
 mode = "arm"
 
 [[entry_point]]
+addr = 0x02287d1c
+mode = "arm"
+
+[[entry_point]]
 addr = 0x02287d20
 mode = "arm"
 
@@ -1773,6 +1781,10 @@ mode = "arm"
 
 [[entry_point]]
 addr = 0x022888d8
+mode = "arm"
+
+[[entry_point]]
+addr = 0x022888f8
 mode = "arm"
 
 [[entry_point]]
