@@ -3236,6 +3236,10 @@ addr = 0x027ed25c
 mode = "arm"
 
 [[entry_point]]
+addr = 0x027ed408
+mode = "thumb"
+
+[[entry_point]]
 addr = 0x027ed468
 mode = "arm"
 
@@ -3396,6 +3400,10 @@ addr = 0x027ee918
 mode = "arm"
 
 [[entry_point]]
+addr = 0x027eea94
+mode = "thumb"
+
+[[entry_point]]
 addr = 0x027eeb8c
 mode = "arm"
 
@@ -3524,6 +3532,10 @@ addr = 0x027f0b00
 mode = "arm"
 
 [[entry_point]]
+addr = 0x027f0b50
+mode = "thumb"
+
+[[entry_point]]
 addr = 0x027f0b74
 mode = "arm"
 
@@ -3593,6 +3605,10 @@ mode = "arm"
 
 [[entry_point]]
 addr = 0x027f187c
+mode = "arm"
+
+[[entry_point]]
+addr = 0x027f1940
 mode = "arm"
 
 [[entry_point]]

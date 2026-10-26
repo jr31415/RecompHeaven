@@ -47,7 +47,12 @@ def fuzz_run(job):
         period = rnd.choice([20, 24, 26, 28, 30, 32, 36, 40])
         phase = rnd.randrange(period)
         t0 = s.vb; end = t0 + frames
+        dumped = False
         while s.vb < end:
+            if os.environ.get("NDS_FUZZ_DUMP") and not dumped and s.tier3()["tier3_insns9"] > 0:
+                dumped = True
+                blob = b"".join(bytes.fromhex(s.call(cmd="read_mem", cpu=9, addr=0x02287000 + k * 0x1000, len=0x1000)["hex"]) for k in range(6))
+                Path(os.environ["NDS_FUZZ_DUMP"] + ".first").write_bytes(blob)
             if mode == 2:
                 # tap on a fixed grid with jitter: sweeps hit/near-miss/miss offsets over the run
                 nxt = ((s.vb - t0 - phase) // period + 1) * period + phase + t0

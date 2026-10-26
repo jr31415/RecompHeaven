@@ -56,7 +56,7 @@ def is_end_early(ins):
     return m in ("mov", "movs", "ldr") and bool(ins.operands) and pc(ins.operands[0])
 
 
-def estimate_module(blob, base, funcs):
+def estimate_module(blob, base, funcs, ptr_values=None):
     size = len(blob)
     cov = bytearray(size)
     for a, n, _ in funcs:
@@ -101,14 +101,19 @@ def estimate_module(blob, base, funcs):
 
     seedsA, seedsB, seedsC = set(), set(), set()
     seedsE = set()          # pointers to the middle of compiled code (case labels, callbacks)
-    # A: pointers anywhere
-    for o in range(0, size - 3, 4):
-        w = struct.unpack_from("<I", blob, o)[0]
+    # A: pointers anywhere (any module's words, since callbacks are registered cross-module)
+    if ptr_values is None:
+        ptr_values = set()
+        for o in range(0, size - 3, 4):
+            w = struct.unpack_from("<I", blob, o)[0]
+            ptr_values.add(w)
+    for w in ptr_values:
         t = w & ~1
-        if base <= t < base + size and in_gap(t - base):
+        if not (base <= t < base + size):
+            continue
+        if in_gap(t - base):
             seedsA.add((t - base, bool(w & 1)))
-        elif base <= t < base + size and cov[t - base] and (t & (1 if (w & 1) else 3)) == 0 \
-                and not pool[o] and (t - base) not in entry_offsets:
+        elif cov[t - base] and (t & (1 if (w & 1) else 3)) == 0 and (t - base) not in entry_offsets:
             seedsE.add((t - base, bool(w & 1)))
     # B: direct targets out of covered code
     for t, th in direct:
@@ -188,7 +193,7 @@ def estimate_module(blob, base, funcs):
                 any_claim[a0:a0 + n] = b"\x01" * n
 
     run(seedsB, "B")      # strongest first so provenance is credited to the best evidence
-    run(seedsA, "A")
+    run(seedsA, "A", 1)
     run(seedsC, "C")
     run(seedsD, "D", 1)
     valid_seeds = sorted(jt_slots | seedsE | {(o, th) for tag, ss in (('B', seedsB), ('A', seedsA), ('C', seedsC), ('D', seedsD)) for o, th in ss if claimed[tag][o]})
@@ -214,6 +219,10 @@ def main():
     for r in ov:
         st = r["file"][:-4]; b = int(r["load_address"], 16)
         mods.append((st, (img / "overlays" / r["file"]).read_bytes(), b, [f"rh_arm9_{st}_{b:08x}"], False))
+    ptr_all = set()
+    for _n, _b, _base, _banks, _m in mods:
+        for o in range(0, len(_b) - 3, 4):
+            ptr_all.add(struct.unpack_from("<I", _b, o)[0])
     tot = dict(size=0, covered=0, pool=0, A=0, B=0, C=0, gap=0)
     per = {}
     for name, blob, base, banks, multi in mods:
@@ -229,7 +238,7 @@ def main():
             base = 0x02380000
         else:
             funcs = covered_map(a.banks, banks[0], base, len(blob)) or []
-        r = estimate_module(blob, base, funcs)
+        r = estimate_module(blob, base, funcs, ptr_all)
         per[name] = r
         if a.emit_seeds:
             out = Path(a.emit_seeds) / "seeds"; out.mkdir(parents=True, exist_ok=True)
