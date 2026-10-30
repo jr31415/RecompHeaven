@@ -33,6 +33,7 @@ class Session:
             raise RuntimeError("runner did not open its debug port")
         self.f = self.sk.makefile("rw", newline="\n")
         self.vb = 0
+        self.mirror = False   # right-handed mode: the game's whole UI is rotated 180 degrees
 
     def call(self, **r):
         self.f.write(json.dumps(r) + "\n"); self.f.flush()
@@ -49,11 +50,16 @@ class Session:
     def frame(self):
         return self.call(cmd="event_counts").get("vblank9", self.vb)
 
+    def _m(self, x, y):
+        return (255 - x, 191 - y) if self.mirror else (x, y)
+
     def touch(self, x, y, hold=3):
+        x, y = self._m(x, y)
         self.call(cmd="touch", x=x, y=y, down=True); self.run(hold)
         self.call(cmd="touch", x=x, y=y, down=False)
 
     def down(self, x, y, hold=1):
+        x, y = self._m(x, y)
         self.call(cmd="touch", x=x, y=y, down=True); self.run(hold)
 
     def up(self, hold=1):
@@ -61,10 +67,11 @@ class Session:
 
     def flick(self, x0, y0, x1, y1, frames=4):
         for k in range(frames + 1):
-            self.call(cmd="touch", x=round(x0 + (x1 - x0) * k / frames),
-                      y=round(y0 + (y1 - y0) * k / frames), down=True)
+            x, y = self._m(round(x0 + (x1 - x0) * k / frames), round(y0 + (y1 - y0) * k / frames))
+            self.call(cmd="touch", x=x, y=y, down=True)
             self.run(1)
-        self.call(cmd="touch", x=x1, y=y1, down=False)
+        x, y = self._m(x1, y1)
+        self.call(cmd="touch", x=x, y=y, down=False)
 
     def keys(self, mask, hold=3):
         self.call(cmd="keys", mask=mask); self.run(hold); self.call(cmd="keys", mask=0)
@@ -88,7 +95,10 @@ class Session:
         parts = []
         for eng in "AB":
             r = self.call(cmd="framebuffer", engine=eng)
-            parts.append((r["w"], r["h"], bytes.fromhex(r["rgb"])))
+            rgb = bytes.fromhex(r["rgb"])
+            if self.mirror:   # present right-handed frames as left-handed ones
+                rgb = b"".join(rgb[i:i + 3] for i in range(len(rgb) - 3, -1, -3))
+            parts.append((r["w"], r["h"], rgb))
         return parts
 
     def digest(self):
@@ -154,10 +164,16 @@ def tile_hash(w, h, rgb, cx, cy):
     return hashlib.sha1(data).hexdigest()[:10]
 
 
-def boot_to_map(s):
-    """Boot with the (left-handed) 100% save to the game-select map, no savestates."""
+def boot_to_map(s, right=False):
+    """Boot with the (left-handed) 100% save to the game-select map, no savestates.
+    right=True answers Yes to "Change to right-handed?"; the game then draws and reads
+    everything rotated 180 degrees, which Session.mirror hides from callers."""
     s.run_to(600); s.touch(14, 14, 6)          # "Change to right-handed?" prompt button
-    s.run_to(800); s.touch(150, 45, 6)         # No
+    if right:
+        s.run_to(800); s.touch(145, 136, 6)    # Yes
+        s.mirror = True
+    else:
+        s.run_to(800); s.touch(150, 45, 6)     # No
     s.run_to(1000)
     s.down(128, 96, 6); s.down(100, 96, 2); s.down(60, 96, 2); s.down(10, 96, 1); s.up(1)  # start flick
     s.run_to(1250); s.touch(60, 96, 6)         # file slot 1

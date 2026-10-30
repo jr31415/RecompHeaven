@@ -19,9 +19,9 @@ from rhplay import Session, boot_to_map, pan, tap_game_tile  # noqa: E402
 
 
 def fuzz_run(job):
-    runner, rom, save, game, seed, frames, out, work = job
+    runner, rom, save, game, seed, frames, out, work, hand = job
     rnd = random.Random(seed)
-    tag = f"{game['gid']}-{seed}"
+    tag = f"{game['gid']}-{seed}" + ("-R" if hand == "right" else "")
     mf = Path(out) / f"{tag}.json"
     if mf.exists():
         return tag, None, "skip"
@@ -29,7 +29,7 @@ def fuzz_run(job):
     sv = w / "save.sav"; shutil.copyfile(save, sv)
     s = Session(runner, rom, w, save=sv)
     try:
-        boot_to_map(s); s.run(5)
+        boot_to_map(s, right=(hand == "right")); s.run(5)
         if game.get("hub"):
             # ring icon -> hub -> category -> (scroll) -> item -> PLAY
             s.touch(22, 95, 6); s.run(240)
@@ -86,11 +86,12 @@ def main():
     ap.add_argument("--runs", type=int, default=6); ap.add_argument("--frames", type=int, default=9000)
     ap.add_argument("--jobs", type=int, default=4); ap.add_argument("--only", default="")
     ap.add_argument("--seed0", type=int, default=0)
+    ap.add_argument("--hand", choices=("left", "right"), default="left", help="game handedness (right = UI rotated 180)")
     a = ap.parse_args()
     Path(a.out).mkdir(parents=True, exist_ok=True)
     games = json.load(open(a.tiles))
     only = set(filter(None, a.only.split(",")))
-    jobs = [(a.runner, a.rom, a.save, g, a.seed0 + k, a.frames, a.out, a.work)
+    jobs = [(a.runner, a.rom, a.save, g, a.seed0 + k, a.frames, a.out, a.work, a.hand)
             for k in range(a.runs) for gid, g in games.items() if not only or gid in only]
     print(len(games), "games,", len(jobs), "runs", flush=True)
     t = time.time()
