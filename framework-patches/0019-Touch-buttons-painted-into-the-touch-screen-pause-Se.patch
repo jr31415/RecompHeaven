@@ -1,0 +1,678 @@
+From 71f8731f8aad02b7e6a75cf02b31e2b87e02a97e Mon Sep 17 00:00:00 2001
+From: jr31415 <jacob@rosen4.com>
+Date: Fri, 30 Oct 2026 13:07:20 -0700
+Subject: [PATCH 19/19] Touch buttons painted into the touch screen
+ (pause=Select, bend=L+R), scene fingerprints, multi-pointer arbitration,
+ debug touch_path
+
+---
+ runner/CMakeLists.txt               |   7 +
+ runner/src/debug_server.cpp         |   2 +
+ runner/src/frontend.cpp             | 217 +++++++++++++++++++++++++++-
+ runner/src/frontend.h               |   6 +
+ runner/src/frontend_config.cpp      |  43 ++++++
+ runner/src/touch_buttons.cpp        | 125 ++++++++++++++++
+ runner/src/touch_buttons.h          |  53 +++++++
+ runner/tests/touch_buttons_test.cpp |  34 +++++
+ 8 files changed, 486 insertions(+), 1 deletion(-)
+ create mode 100644 runner/src/touch_buttons.cpp
+ create mode 100644 runner/src/touch_buttons.h
+ create mode 100644 runner/tests/touch_buttons_test.cpp
+
+diff --git a/runner/CMakeLists.txt b/runner/CMakeLists.txt
+index bfb30f3..1694c2f 100644
+--- a/runner/CMakeLists.txt
++++ b/runner/CMakeLists.txt
+@@ -484,6 +484,7 @@ add_executable(nds_runner
+     src/relative_mouse_touch.cpp
+     "${NDS_RECOMP_UI_ROOT}/src/common/recomp_runtime_ui.c"
+     src/frontend.cpp
++    src/touch_buttons.cpp
+     src/main.cpp
+     src/runtime_exports.def
+     "${TITLE_BANK_REGISTRY}"
+@@ -846,6 +847,12 @@ endif()
+ 
+ find_package(Python3 COMPONENTS Interpreter QUIET)
+ 
++  add_executable(touch_buttons_test
++      tests/touch_buttons_test.cpp
++      src/touch_buttons.cpp)
++  target_include_directories(touch_buttons_test PRIVATE src)
++  add_test(NAME touch_buttons_test COMMAND touch_buttons_test)
++
+   add_executable(frontend_config_test
+       tests/frontend_config_test.cpp
+       src/frontend_config.cpp)
+diff --git a/runner/src/debug_server.cpp b/runner/src/debug_server.cpp
+index 8cbba6a..036dd82 100644
+--- a/runner/src/debug_server.cpp
++++ b/runner/src/debug_server.cpp
+@@ -1271,6 +1271,8 @@ std::string handle(const std::string& line) {
+             ok = nds_frontend_debug_mouse_motion(
+                 static_cast<int>(json_i64(line, "dx", 0)),
+                 static_cast<int>(json_i64(line, "dy", 0)));
++        } else if (action == "touch_path") {
++            ok = nds_frontend_debug_touch_path(json_str(line, "path").c_str());
+         } else if (action == "touch") {
+             ok = nds_frontend_debug_touch(
+                 static_cast<uint16_t>(json_u64(line, "x", 0)),
+diff --git a/runner/src/frontend.cpp b/runner/src/frontend.cpp
+index a7a8379..a17c6c8 100644
+--- a/runner/src/frontend.cpp
++++ b/runner/src/frontend.cpp
+@@ -772,6 +772,9 @@ bool sdl_push_event(SDL_Event& event) {
+ 
+ bool sdl_init_frontend() {
+ #if defined(NDS_HAVE_SDL3)
++    // Fingers are tracked individually (a held on-screen button plus a stylus at once), so
++    // SDL's single-pointer touch->mouse emulation is off; finger_to_pointer() replaces it.
++    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+     return SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS |
+                     SDL_INIT_GAMECONTROLLER);
+ #else
+@@ -2047,6 +2050,44 @@ void unrotate_mouse_event(SDL_Event& event,
+     }
+ }
+ 
++#if defined(NDS_HAVE_SDL3)
++constexpr uint32_t kFingerPointerTag = 0x40000000u;
++// Direct-touch fingers become left-button pointer events whose `which` carries the finger id,
++// so the handler can tell pointers apart. Trackpads (indirect devices) keep SDL's mouse path.
++void finger_to_pointer(SDL_Event& e) {
++    if (e.type != SDL_EVENT_FINGER_DOWN && e.type != SDL_EVENT_FINGER_UP &&
++        e.type != SDL_EVENT_FINGER_MOTION)
++        return;
++    if (SDL_GetTouchDeviceType(e.tfinger.touchID) != SDL_TOUCH_DEVICE_DIRECT) return;
++    SDL_Window* window = SDL_GetWindowFromID(e.tfinger.windowID);
++    if (!window) return;
++    int w = 0, h = 0;
++    SDL_GetWindowSize(window, &w, &h);
++    const float x = e.tfinger.x * static_cast<float>(w), y = e.tfinger.y * static_cast<float>(h);
++    const uint32_t id = kFingerPointerTag | static_cast<uint32_t>(e.tfinger.fingerID & 0xFFFFFu);
++    const uint32_t wid = e.tfinger.windowID;
++    const uint64_t ts = e.tfinger.timestamp;
++    const int kind = e.type == SDL_EVENT_FINGER_DOWN ? 0 : e.type == SDL_EVENT_FINGER_UP ? 1 : 2;
++    SDL_zero(e);
++    if (kind == 2) {
++        e.motion.type = SDL_EVENT_MOUSE_MOTION; e.motion.timestamp = ts;
++        e.motion.windowID = wid; e.motion.which = id; e.motion.state = SDL_BUTTON_LMASK;
++        e.motion.x = x; e.motion.y = y;
++    } else {
++        e.button.type = kind == 0 ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
++        e.button.timestamp = ts; e.button.windowID = wid; e.button.which = id;
++        e.button.button = SDL_BUTTON_LEFT; e.button.down = kind == 0; e.button.clicks = 1;
++        e.button.x = x; e.button.y = y;
++    }
++}
++uint64_t pointer_id(const SDL_Event& e) {
++    return 1u + (e.type == SDL_EVENT_MOUSE_MOTION ? e.motion.which : e.button.which);
++}
++#else
++void finger_to_pointer(SDL_Event&) {}
++uint64_t pointer_id(const SDL_Event&) { return 1; }
++#endif
++
+ // Apple Pencil / pens: SDL reports pen motion as SDL_EVENT_PEN_MOTION and only
+ // emulates mouse motion under conditions that did not hold on iPadOS (taps
+ // arrived, drags did not). Re-express pen motion as a mouse motion with the
+@@ -2848,6 +2889,19 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     bool hand_locked = false;
+     int hand_candidate = 0;
+     int hand_agree = 0;
++    // On-screen touch buttons (touch_buttons.h): pause, bend, ... painted into the touch screen.
++    const NdsTouchButtonConfig& tbcfg = options.touch_buttons;
++    struct TbRuntime {
++        bool visible = false, held = false, release_pending = false;
++        uint64_t holder = 0;
++        uint32_t frames_held = 0;
++    };
++    std::vector<TbRuntime> tb(tbcfg.buttons.size());
++    std::vector<char> tb_scene_on(tbcfg.scenes.size(), 0);
++    uint16_t touchbtn_pressed = 0;
++    int tb_rotation = base_rotation;
++    uint64_t stylus_owner = 0;   // pointer currently driving the game's touch input
++    std::vector<uint32_t> tb_frame;   // touch screen with the buttons painted in
+     std::fprintf(stderr, "[sdl] audio queue target=%u frames (~%.1f ms)\n",
+                  audio_target_now, audio_target_now * 1000.0 / 32768.0);
+     constexpr uint32_t kRecordRing = 1u << 16;
+@@ -3011,7 +3065,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+         nds_set_key_mask(static_cast<uint16_t>(
+             0x0FFFu &
+             ~(keyboard_pressed | controller_pressed | mouse_pressed |
+-              mph_prime_pressed | stick_pressed)));
++              mph_prime_pressed | stick_pressed | touchbtn_pressed)));
+     };
+     publish_keys();
+     nds_set_touch(0, 0, false);
+@@ -3382,6 +3436,100 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+     auto runtime_menu_open = [&]() {
+         return runtime_ui && recomp_runtime_ui_is_open(runtime_ui);
+     };
++    auto tb_apply = [&]() {
++        uint16_t bits = 0;
++        for (size_t i = 0; i < tb.size(); ++i)
++            if (tb[i].visible && (tb[i].held || tb[i].release_pending))
++                bits |= tbcfg.buttons[i].keys;
++        if (bits != touchbtn_pressed) {
++            touchbtn_pressed = bits;
++            publish_keys();
++        }
++    };
++    // Which scene is running, from a fingerprint of guest RAM (the resident overlay).
++    auto tb_refresh_scenes = [&]() {
++        if (tbcfg.empty()) return;
++        for (size_t i = 0; i < tbcfg.scenes.size(); ++i) {
++            const NdsSceneDef& sc = tbcfg.scenes[i];
++            std::vector<uint8_t> bytes(sc.len & ~3u);
++            for (size_t o = 0; o + 4 <= bytes.size(); o += 4) {
++                const uint32_t w = bus_read_u32(sc.addr + static_cast<uint32_t>(o));
++                std::memcpy(bytes.data() + o, &w, 4);
++            }
++            const uint64_t h = nds_fnv1a64(bytes.data(), bytes.size());
++            bool on = std::find(sc.hashes.begin(), sc.hashes.end(), h) != sc.hashes.end();
++            // NDS_TB_FORCE=scene,scene: pretend these scenes are active (UI testing only).
++            if (const char* force = std::getenv("NDS_TB_FORCE"))
++                if ((std::string(",") + force + ",").find(std::string(",") + sc.name + ",") != std::string::npos) on = true;
++            if (on != (tb_scene_on[i] != 0)) {
++                tb_scene_on[i] = on ? 1 : 0;
++                std::fprintf(stderr, "[touch-buttons] scene %s %s\n", sc.name.c_str(),
++                             on ? "on" : "off");
++            }
++        }
++        for (size_t i = 0; i < tb.size(); ++i) {
++            const NdsTouchButtonDef& b = tbcfg.buttons[i];
++            bool vis = b.scenes.empty();
++            for (const std::string& name : b.scenes)
++                for (size_t k = 0; k < tbcfg.scenes.size(); ++k)
++                    if (tb_scene_on[k] && tbcfg.scenes[k].name == name) vis = true;
++            if (!vis && tb[i].held) { tb[i].held = false; tb[i].release_pending = false; }
++            tb[i].visible = vis;
++        }
++        tb_apply();
++    };
++    // Logical canvas position -> raw touch-screen pixel.
++    auto tb_bottom_local = [&](float x, float y, int* rx, int* ry) -> bool {
++        const float origin = presentation.separate ? 0.0f : static_cast<float>(kScreenHeight);
++        const float left = static_cast<float>((bottom_logical_width - kScreenWidth) / 2);
++        if (x < left || x >= left + kScreenWidth || y < origin || y >= origin + kScreenHeight)
++            return false;
++        *rx = static_cast<int>(x - left);
++        *ry = static_cast<int>(y - origin);
++        return true;
++    };
++    // Returns true when the event was consumed (a button press, or a second pointer while one
++    // already drives the stylus). Several pointers can be live at once: a finger holding BEND
++    // while the pencil strums.
++    auto tb_pointer = [&](SDL_Event& e) -> bool {
++        if (tbcfg.empty()) return false;
++        const bool down = e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT;
++        const bool up = e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT;
++        const bool move = e.type == SDL_MOUSEMOTION;
++        if (!down && !up && !move) return false;
++        const uint64_t id = pointer_id(e);
++        const float x = move ? e.motion.x : e.button.x, y = move ? e.motion.y : e.button.y;
++        for (size_t i = 0; i < tb.size(); ++i)
++            if (tb[i].held && tb[i].holder == id) {
++                if (up) {
++                    tb[i].held = false;
++                    tb[i].release_pending = true;   // hold at least a few frames, like a tap
++                    tb_apply();
++                }
++                return true;
++            }
++        if (down) {
++            int rx, ry;
++            if (!runtime_menu_open() && tb_bottom_local(x, y, &rx, &ry))
++                for (size_t i = 0; i < tb.size(); ++i)
++                    if (tb[i].visible && !tb[i].held &&
++                        nds_button_hit(tb_rotation, tbcfg.buttons[i], rx, ry)) {
++                        tb[i].held = true;
++                        tb[i].release_pending = false;
++                        tb[i].holder = id;
++                        tb[i].frames_held = 0;
++                        tb_apply();
++                        return true;
++                    }
++            if (stylus_owner == 0) { stylus_owner = id; return false; }
++            return stylus_owner != id;
++        }
++        if (up) {
++            if (stylus_owner == id) { stylus_owner = 0; return false; }
++            return stylus_owner != 0;
++        }
++        return stylus_owner != 0 && stylus_owner != id;   // motion
++    };
+     auto clear_gameplay_input_for_runtime_menu = [&]() {
+         release_relative_mouse();
+         keyboard_pressed = 0;
+@@ -3787,10 +3935,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                 }
+             }
+             if (!threaded) {
++                finger_to_pointer(event);
+                 pen_motion_to_mouse(event);
+                 convert_mouse_event_to_logical_coordinates(event, presentation);
+                 unrotate_mouse_event(event, presentation);
+             }
++            if (tb_pointer(event)) continue;
+             if (event.type == SDL_QUIT) {
+                 release_relative_mouse();
+                 running = false;
+@@ -4647,6 +4797,15 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+ 
+         if (mouse_down || touch_release_pending)
+             ++touch_frames_held;
++        if (!tbcfg.empty()) {
++            if ((shown_frames & 7u) == 0) tb_refresh_scenes();
++            for (TbRuntime& b : tb)
++                if (b.held || b.release_pending) {
++                    ++b.frames_held;
++                    if (!b.held && b.frames_held >= 3) b.release_pending = false;
++                }
++            tb_apply();
++        }
+         if (touch_release_pending && touch_frames_held >= 2) {
+             nds_set_touch(0, 0, false);
+             touch_release_pending = false;
+@@ -4685,6 +4844,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                     std::fprintf(stderr,
+                                  "[sdl] %s-handed mode detected; rotation %d\n",
+                                  hand_left ? "left" : "right", effective);
++                    tb_rotation = effective;
+                     run_on_main([&presentation, effective]() {
+                         presentation.rotation = effective;
+                     }, false);
+@@ -4731,6 +4891,36 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+                 nds_gpu2d_adaptive_framebuffer(1, &bottom_width);
+         phase_adaptive_ticks +=
+             SDL_GetPerformanceCounter() - adaptive_start;
++        if (!tbcfg.empty() && bottom_width == kScreenWidth &&
++            !nds_gpu2d_direct_present_frame_active()) {
++            bool any_button = false;
++            for (const TbRuntime& b : tb) any_button = any_button || b.visible;
++            if (any_button) {
++                tb_frame.assign(bottom_pixels,
++                                bottom_pixels + kScreenWidth * kScreenHeight);
++                for (size_t i = 0; i < tb.size(); ++i)
++                    if (tb[i].visible)
++                        nds_button_draw(tb_frame.data(), tb_rotation, tbcfg.buttons[i],
++                                        tb[i].held || tb[i].release_pending);
++                bottom_pixels = tb_frame.data();
++                // NDS_TB_DUMP=prefix: save a few composed touch screens as PPM (for checking the art).
++                static int dumped = 0;
++                if (const char* dump = std::getenv("NDS_TB_DUMP"))
++                    if (dumped < 12 && (shown_frames % 90) == 0) {
++                        const std::string path = std::string(dump) + "-" + std::to_string(dumped++) + ".ppm";
++                        if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
++                            std::fprintf(f, "P6\n256 192\n255\n");
++                            for (uint32_t px : tb_frame) {
++                                const unsigned char rgb[3] = {static_cast<unsigned char>(px >> 16),
++                                                              static_cast<unsigned char>(px >> 8),
++                                                              static_cast<unsigned char>(px)};
++                                std::fwrite(rgb, 1, 3, f);
++                            }
++                            std::fclose(f);
++                        }
++                    }
++            }
++        }
+         observe_top_black_bands(native_top, shown_frames);
+         // At most ONE synthetic frame, presented ahead of the real one, so
+         // the visible order stays real(N-1), blend(N-1,N), real(N). No
+@@ -5142,6 +5332,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& initial_options) {
+             }
+         };
+         auto queue_pending_events = [&](SDL_Event& e) {
++            finger_to_pointer(e);
+             pen_motion_to_mouse(e);
+             convert_mouse_event_to_logical_coordinates(e, presentation);
+             unrotate_mouse_event(e, presentation);
+@@ -5442,6 +5633,30 @@ bool nds_frontend_debug_mouse_motion(int dx, int dy) {
+ #endif
+ }
+ 
++// "x,y,frames;x,y,frames;..." : press at each point for that many frames, then release. Runs on
++// its own thread so a swipe keeps its frame timing regardless of debug-socket round trips.
++bool nds_frontend_debug_touch_path(const char* path) {
++    if (!path) return false;
++    std::vector<std::array<int, 3>> steps;
++    for (const char* p = path; *p;) {
++        int x = 0, y = 0, n = 0, used = 0;
++        if (std::sscanf(p, "%d,%d,%d%n", &x, &y, &n, &used) < 3) break;
++        steps.push_back({x, y, n});
++        p += used;
++        if (*p == ';') ++p;
++    }
++    if (steps.empty()) return false;
++    std::thread([steps]() {
++        for (const auto& st : steps) {
++            nds_frontend_debug_touch(static_cast<uint16_t>(st[0]), static_cast<uint16_t>(st[1]), true);
++            std::this_thread::sleep_for(std::chrono::microseconds(st[2] * 16700));
++        }
++        nds_frontend_debug_touch(static_cast<uint16_t>(steps.back()[0]),
++                                 static_cast<uint16_t>(steps.back()[1]), false);
++    }).detach();
++    return true;
++}
++
+ bool nds_frontend_debug_touch(uint16_t x, uint16_t y, bool down) {
+ #if defined(NDS_HAVE_SDL3) || defined(NDS_HAVE_SDL2)
+     if (!g_input_debug.active || x >= kScreenWidth || y >= kScreenHeight)
+diff --git a/runner/src/frontend.h b/runner/src/frontend.h
+index 673b875..3072121 100644
+--- a/runner/src/frontend.h
++++ b/runner/src/frontend.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include "touch_buttons.h"
++
+ #include <cstdint>
+ #include <string>
+ 
+@@ -203,6 +205,9 @@ struct NdsFrontendOptions {
+     // bits in OAM and adds 180 degrees to screen_rotation while left-handed
+     // mode is active, and removes it when right-handed mode returns.
+     bool auto_hand_rotation = false;
++    // On-screen buttons painted into the touch screen (pause, bend, ...) and the
++    // scene fingerprints that decide when each one exists. See touch_buttons.h.
++    NdsTouchButtonConfig touch_buttons;
+     NdsFullscreenMode fullscreen = NdsFullscreenMode::Off;
+     NdsStartupMode startup_mode = NdsStartupMode::Preserve;
+     NdsBootMode boot_mode = NdsBootMode::Lle;
+@@ -482,6 +487,7 @@ bool nds_frontend_debug_key(const char* key_name, bool down,
+ bool nds_frontend_debug_mouse_button(uint8_t button, bool down);
+ bool nds_frontend_debug_mouse_motion(int dx, int dy);
+ bool nds_frontend_debug_touch(uint16_t x, uint16_t y, bool down);
++bool nds_frontend_debug_touch_path(const char* path);
+ bool nds_frontend_debug_capture_mouse();
+ bool nds_frontend_debug_release_mouse();
+ void nds_frontend_input_debug_state(NdsFrontendInputDebugState* out);
+diff --git a/runner/src/frontend_config.cpp b/runner/src/frontend_config.cpp
+index 67d4d50..dcf4522 100644
+--- a/runner/src/frontend_config.cpp
++++ b/runner/src/frontend_config.cpp
+@@ -735,6 +735,49 @@ bool nds_load_frontend_config(const std::string& path,
+         }
+     }
+ 
++    // [[touch_button]] / [[scene]]: buttons painted into the touch screen, shown per scene.
++    if (const toml::array* scenes = root["scene"].as_array()) {
++        for (const toml::node& n : *scenes) {
++            const toml::table* t = n.as_table();
++            if (!t) continue;
++            NdsSceneDef def;
++            def.name = (*t)["name"].value_or(std::string{});
++            def.addr = static_cast<uint32_t>((*t)["addr"].value_or<int64_t>(0));
++            def.len = static_cast<uint32_t>((*t)["len"].value_or<int64_t>(256));
++            if (const toml::array* hs = (*t)["hashes"].as_array())
++                for (const toml::node& h : *hs)
++                    if (auto v = h.value<std::string>())
++                        def.hashes.push_back(std::strtoull(v->c_str(), nullptr, 16));
++            if (!def.name.empty() && def.len)
++                options->touch_buttons.scenes.push_back(std::move(def));
++        }
++    }
++    if (const toml::array* buttons = root["touch_button"].as_array()) {
++        static const struct { const char* name; unsigned bit; } kKeys[] = {
++            {"a", 0}, {"b", 1}, {"select", 2}, {"start", 3}, {"right", 4}, {"left", 5},
++            {"up", 6}, {"down", 7}, {"r", 8}, {"l", 9}, {"x", 10}, {"y", 11}};
++        for (const toml::node& n : *buttons) {
++            const toml::table* t = n.as_table();
++            if (!t) continue;
++            NdsTouchButtonDef def;
++            def.name = (*t)["name"].value_or(std::string{});
++            def.icon = (*t)["icon"].value_or(def.name);
++            def.corner = (*t)["corner"].value_or(std::string("top-right"));
++            def.width = static_cast<int>((*t)["width"].value_or<int64_t>(20));
++            def.height = static_cast<int>((*t)["height"].value_or<int64_t>(20));
++            if (const toml::array* ks = (*t)["keys"].as_array())
++                for (const toml::node& k : *ks)
++                    if (auto v = k.value<std::string>())
++                        for (const auto& e : kKeys)
++                            if (*v == e.name) def.keys |= static_cast<uint16_t>(1u << e.bit);
++            if (const toml::array* ss = (*t)["scenes"].as_array())
++                for (const toml::node& sc : *ss)
++                    if (auto v = sc.value<std::string>()) def.scenes.push_back(*v);
++            if (!def.name.empty() && def.keys)
++                options->touch_buttons.buttons.push_back(std::move(def));
++        }
++    }
++
+     if (const toml::table* cartridge = root["cartridge"].as_table()) {
+         if (const auto value =
+                 (*cartridge)["save_type"].value<std::string>()) {
+diff --git a/runner/src/touch_buttons.cpp b/runner/src/touch_buttons.cpp
+new file mode 100644
+index 0000000..9676f83
+--- /dev/null
++++ b/runner/src/touch_buttons.cpp
+@@ -0,0 +1,125 @@
++#include "touch_buttons.h"
++
++#include <algorithm>
++#include <array>
++#include <cstring>
++
++namespace {
++constexpr int kW = 256, kH = 192;
++
++void px_view(uint32_t* raw, int rotation, int vx, int vy, uint32_t argb) {
++    if (vx < 0 || vy < 0 || vx >= nds_touch_view_width(rotation) ||
++        vy >= nds_touch_view_height(rotation))
++        return;
++    int rx, ry;
++    nds_touch_view_to_raw(rotation, vx, vy, &rx, &ry);
++    raw[ry * kW + rx] = argb;
++}
++
++void rect_view(uint32_t* raw, int rotation, int x, int y, int w, int h, uint32_t c) {
++    for (int j = 0; j < h; ++j)
++        for (int i = 0; i < w; ++i) px_view(raw, rotation, x + i, y + j, c);
++}
++
++// Colours sampled from the game's own "Back"/"Skip" buttons.
++constexpr uint32_t kOutline = 0xFF000000, kFill = 0xFF4DFFFF, kHighlight = 0xFFF3FFFF,
++                   kShade1 = 0xFF00E7B6, kShade2 = 0xFF00B6A6, kInk = 0xFF008F84,
++                   kWhite = 0xFFFFFFFF;
++
++// 3x5 glyphs for the label.
++const char* glyph(char c) {
++    switch (c) {
++        case 'B': return "110101110101110";
++        case 'E': return "111100110100111";
++        case 'N': return "101111111101101";
++        case 'D': return "110101101101110";
++        default:  return "000000000000000";
++    }
++}
++
++void draw_text(uint32_t* raw, int rotation, int x, int y, const char* s, uint32_t c) {
++    for (; *s; ++s, x += 4) {
++        const char* g = glyph(*s);
++        for (int j = 0; j < 5; ++j)
++            for (int i = 0; i < 3; ++i)
++                if (g[j * 3 + i] == '1') px_view(raw, rotation, x + i, y + j, c);
++    }
++}
++}  // namespace
++
++int nds_touch_view_width(int r) { return (r == 90 || r == 270) ? kH : kW; }
++int nds_touch_view_height(int r) { return (r == 90 || r == 270) ? kW : kH; }
++
++void nds_touch_raw_to_view(int r, int x, int y, int* vx, int* vy) {
++    switch (r) {
++        case 90:  *vx = kH - 1 - y; *vy = x; break;
++        case 180: *vx = kW - 1 - x; *vy = kH - 1 - y; break;
++        case 270: *vx = y; *vy = kW - 1 - x; break;
++        default:  *vx = x; *vy = y; break;
++    }
++}
++
++void nds_touch_view_to_raw(int r, int vx, int vy, int* x, int* y) {
++    switch (r) {
++        case 90:  *x = vy; *y = kH - 1 - vx; break;
++        case 180: *x = kW - 1 - vx; *y = kH - 1 - vy; break;
++        case 270: *x = kW - 1 - vy; *y = vx; break;
++        default:  *x = vx; *y = vy; break;
++    }
++}
++
++NdsViewRect nds_button_view_rect(int rotation, const NdsTouchButtonDef& d) {
++    const int vw = nds_touch_view_width(rotation), vh = nds_touch_view_height(rotation);
++    const bool right = d.corner.find("right") != std::string::npos;
++    const bool bottom = d.corner.find("bottom") != std::string::npos;
++    return {right ? vw - d.width : 0, bottom ? vh - d.height : 0, d.width, d.height};
++}
++
++bool nds_button_hit(int rotation, const NdsTouchButtonDef& d, int rx, int ry) {
++    int vx, vy;
++    nds_touch_raw_to_view(rotation, rx, ry, &vx, &vy);
++    const NdsViewRect r = nds_button_view_rect(rotation, d);
++    return vx >= r.x && vx < r.x + r.w && vy >= r.y && vy < r.y + r.h;
++}
++
++void nds_button_draw(uint32_t* raw, int rotation, const NdsTouchButtonDef& d, bool pressed) {
++    const NdsViewRect r = nds_button_view_rect(rotation, d);
++    const bool right = d.corner.find("right") != std::string::npos;
++    const bool bottom = d.corner.find("bottom") != std::string::npos;
++    // A tab flush with the screen corner: the outline is only drawn on the sides facing
++    // into the screen, the rest runs off the edge, so no touch area is wasted on margin.
++    const uint32_t fill = pressed ? kShade1 : kFill;
++    rect_view(raw, rotation, r.x, r.y, r.w, r.h, fill);
++    // inner-facing outline
++    const int ox = right ? r.x : r.x + r.w - 1;
++    rect_view(raw, rotation, ox, r.y, 1, r.h, kOutline);
++    const int oy = bottom ? r.y : r.y + r.h - 1;
++    rect_view(raw, rotation, r.x, oy, r.w, 1, kOutline);
++    // shaded edge toward the screen edge (the game's buttons carry one on the far side)
++    if (!pressed) {
++        const int sx = right ? r.x + r.w - 4 : r.x + 1;
++        rect_view(raw, rotation, sx, r.y + 1, 3, r.h - 2, kShade1);
++        rect_view(raw, rotation, right ? sx + 2 : sx, r.y + 1, 1, r.h - 2, kShade2);
++        rect_view(raw, rotation, r.x + 2, r.y + 1, r.w - 7, 1, kHighlight);
++    }
++    const uint32_t ink = pressed ? kWhite : kInk;
++    if (d.icon == "pause") {
++        const int cx = r.x + (r.w - 9) / 2 - (right ? 1 : 0), cy = r.y + (r.h - 9) / 2;
++        rect_view(raw, rotation, cx, cy, 3, 9, ink);
++        rect_view(raw, rotation, cx + 6, cy, 3, 9, ink);
++    } else if (d.icon == "bend") {
++        const int ix = r.x + 4, iy = r.y + (r.h - 9) / 2;
++        // rising curved arrow
++        const int pts[][2] = {{0, 8}, {1, 7}, {2, 6}, {3, 5}, {4, 4}, {5, 3}, {6, 2}};
++        for (auto& p : pts) rect_view(raw, rotation, ix + p[0], iy + p[1], 2, 1, ink);
++        rect_view(raw, rotation, ix + 4, iy, 5, 1, ink);
++        rect_view(raw, rotation, ix + 8, iy, 1, 5, ink);
++        draw_text(raw, rotation, r.x + 14, r.y + (r.h - 5) / 2, "BEND", ink);
++    }
++}
++
++uint64_t nds_fnv1a64(const uint8_t* p, size_t n) {
++    uint64_t h = 1469598103934665603ull;
++    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
++    return h;
++}
+diff --git a/runner/src/touch_buttons.h b/runner/src/touch_buttons.h
+new file mode 100644
+index 0000000..3315b03
+--- /dev/null
++++ b/runner/src/touch_buttons.h
+@@ -0,0 +1,53 @@
++#pragma once
++// On-screen buttons painted into the DS touch screen itself.
++//
++// They are drawn in the game's own button style (black outline, cyan fill, teal
++// shaded edge) straight into the bottom-screen pixel buffer, so they scale, rotate
++// and flip with the game exactly like its own UI, and a press maps to DS keys. The
++// title decides when each one exists: scenes are recognised by fingerprinting guest
++// RAM (the overlay that is resident), configured per title in game.toml.
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++struct NdsSceneDef {
++    std::string name;
++    uint32_t addr = 0;              // guest address fingerprinted
++    uint32_t len = 0;               // bytes hashed (FNV-1a 64)
++    std::vector<uint64_t> hashes;   // any match activates the scene
++};
++
++struct NdsTouchButtonDef {
++    std::string name;
++    std::string icon;               // "pause" | "bend"
++    std::string corner = "top-right";   // in the player's upright view of the touch screen
++    int width = 20;                 // DS pixels, in view orientation
++    int height = 20;
++    uint16_t keys = 0;              // DS key bits (1<<2 Select, 1<<8 R, 1<<9 L, ...)
++    std::vector<std::string> scenes;    // visible when any is active; empty = always
++};
++
++struct NdsTouchButtonConfig {
++    std::vector<NdsTouchButtonDef> buttons;
++    std::vector<NdsSceneDef> scenes;
++    bool empty() const { return buttons.empty(); }
++};
++
++// The touch screen is 256x192 raw. `rotation` is the clockwise host rotation applied to
++// the raw frame (0/90/180/270); the player sees the rotated image.
++struct NdsViewRect { int x, y, w, h; };   // in the player's view of the touch screen
++
++int nds_touch_view_width(int rotation);   // 256 or 192
++int nds_touch_view_height(int rotation);  // 192 or 256
++void nds_touch_raw_to_view(int rotation, int rx, int ry, int* vx, int* vy);
++void nds_touch_view_to_raw(int rotation, int vx, int vy, int* rx, int* ry);
++
++NdsViewRect nds_button_view_rect(int rotation, const NdsTouchButtonDef& def);
++bool nds_button_hit(int rotation, const NdsTouchButtonDef& def, int raw_x, int raw_y);
++
++// Paint the button into a 256x192 ARGB8888 raw touch-screen buffer.
++void nds_button_draw(uint32_t* raw_pixels, int rotation, const NdsTouchButtonDef& def,
++                     bool pressed);
++
++uint64_t nds_fnv1a64(const uint8_t* data, size_t n);
+diff --git a/runner/tests/touch_buttons_test.cpp b/runner/tests/touch_buttons_test.cpp
+new file mode 100644
+index 0000000..0cef165
+--- /dev/null
++++ b/runner/tests/touch_buttons_test.cpp
+@@ -0,0 +1,34 @@
++#include "../src/touch_buttons.h"
++#include <cstdio>
++#include <cstdlib>
++
++int main() {
++    int fails = 0;
++    for (int r : {0, 90, 180, 270}) {
++        for (int y = 0; y < 192; y += 7)
++            for (int x = 0; x < 256; x += 5) {
++                int vx, vy, rx, ry;
++                nds_touch_raw_to_view(r, x, y, &vx, &vy);
++                nds_touch_view_to_raw(r, vx, vy, &rx, &ry);
++                if (rx != x || ry != y || vx < 0 || vy < 0 || vx >= nds_touch_view_width(r) ||
++                    vy >= nds_touch_view_height(r)) { ++fails; }
++            }
++        NdsTouchButtonDef d; d.corner = "top-right"; d.width = 20; d.height = 20;
++        // The corner pixel of the view must hit; one pixel outside must not.
++        const NdsViewRect vr = nds_button_view_rect(r, d);
++        int rx, ry;
++        nds_touch_view_to_raw(r, vr.x + vr.w - 1, 0, &rx, &ry);
++        if (!nds_button_hit(r, d, rx, ry)) ++fails;
++        nds_touch_view_to_raw(r, vr.x - 1, 0, &rx, &ry);
++        if (nds_button_hit(r, d, rx, ry)) ++fails;
++        static uint32_t buf[256 * 192];
++        d.icon = "pause"; nds_button_draw(buf, r, d, false);
++        d.icon = "bend"; d.corner = "bottom-right"; d.width = 34; nds_button_draw(buf, r, d, true);
++    }
++    // top-right of the player's view for 90 degrees is raw (0,0); for 270 raw (255,191)
++    NdsTouchButtonDef t; t.corner = "top-right"; int vx, vy;
++    nds_touch_raw_to_view(90, 0, 0, &vx, &vy); if (vx != 191 || vy != 0) ++fails;
++    nds_touch_raw_to_view(270, 255, 191, &vx, &vy); if (vx != 191 || vy != 0) ++fails;
++    std::printf(fails ? "FAIL %d\n" : "touch_buttons_test ok\n", fails);
++    return fails ? 1 : 0;
++}
+-- 
+2.54.0 (Apple Git-157)
+
