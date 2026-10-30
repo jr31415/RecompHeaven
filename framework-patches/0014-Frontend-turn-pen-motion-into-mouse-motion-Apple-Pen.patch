@@ -1,8 +1,8 @@
 From b27016704f139ec054b5f1f012e5b7567f7e01fc Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Sat, 10 Oct 2026 15:28:23 -0700
-Subject: [PATCH] Frontend: turn pen motion into mouse motion (Apple Pencil
- drags)
+Subject: [PATCH 14/17] Frontend: turn pen motion into mouse motion (Apple
+ Pencil drags)
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---

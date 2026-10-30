@@ -1,7 +1,7 @@
 From 71f8731f8aad02b7e6a75cf02b31e2b87e02a97e Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Fri, 30 Oct 2026 13:07:20 -0700
-Subject: [PATCH 19/19] Touch buttons painted into the touch screen
+Subject: [PATCH 17/17] Touch buttons painted into the touch screen
  (pause=Select, bend=L+R), scene fingerprints, multi-pointer arbitration,
  debug touch_path
 

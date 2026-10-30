@@ -1,7 +1,7 @@
 From 351ab19196ee713637411c9280997daf3b41a253 Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Tue, 13 Oct 2026 14:38:04 -0700
-Subject: [PATCH] iOS latency: IO buffer request via AVAudioSession, 2
+Subject: [PATCH 15/17] iOS latency: IO buffer request via AVAudioSession, 2
  drawables, QoS user-interactive, faster adaptive audio floor decay,
  runner.log
 

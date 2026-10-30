@@ -1,7 +1,7 @@
 From ec7b6410e37c83863fa11f99cad1f41df2922993 Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Sat, 10 Oct 2026 15:20:15 -0700
-Subject: [PATCH 13/13] iOS: define SDL_MAIN_HANDLED in the launcher
+Subject: [PATCH 13/17] iOS: define SDL_MAIN_HANDLED in the launcher
  (UIApplicationMain was entered twice), UIScene manifest
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>

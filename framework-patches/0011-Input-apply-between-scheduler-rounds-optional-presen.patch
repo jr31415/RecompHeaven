@@ -1,7 +1,7 @@
 From 3eae36bf0625df7392e02e4db1ecd079f654de13 Mon Sep 17 00:00:00 2001
 From: jr31415 <jacob@rosen4.com>
 Date: Sat, 10 Oct 2026 13:22:15 -0700
-Subject: [PATCH 11/11] Input: apply between scheduler rounds, optional present
+Subject: [PATCH 11/17] Input: apply between scheduler rounds, optional present
  thread, latency probe
 
 - drain input every round (threaded) / audio chunk (single thread), not only
